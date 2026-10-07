@@ -272,15 +272,7 @@ func (a *app) parse(s string) (slack.Ref, error) {
 	if err != nil {
 		return r, err
 	}
-	if !strings.Contains(r.Workspace, ".") {
-		if all, err := a.store.All(); err == nil {
-			for _, c := range all {
-				if c.TeamID == r.Workspace && c.Workspace != "" {
-					r.Workspace = c.Workspace
-				}
-			}
-		}
-	}
+	r.Workspace = a.store.Canonical(r.Workspace)
 	return r, nil
 }
 

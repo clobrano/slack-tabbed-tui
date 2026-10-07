@@ -138,6 +138,25 @@ func (s Store) Lookup(workspace string) (Credential, error) {
 	return Credential{}, fmt.Errorf("%w to %s: run `slack-tabbed-tui auth https://%s`", ErrNoSession, workspace, hostHint(workspace))
 }
 
+// Canonical returns the workspace host for a team ID when a session for
+// that team is stored, so that every link form of a thread names the
+// same workspace; anything else is returned as is.
+func (s Store) Canonical(workspace string) string {
+	if strings.Contains(workspace, ".") {
+		return workspace
+	}
+	all, err := s.load()
+	if err != nil {
+		return workspace
+	}
+	for _, c := range all {
+		if c.TeamID == workspace && c.Workspace != "" {
+			return c.Workspace
+		}
+	}
+	return workspace
+}
+
 func hostHint(ws string) string {
 	if strings.Contains(ws, ".") {
 		return ws

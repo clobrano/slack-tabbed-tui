@@ -271,3 +271,65 @@ func reply(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+// Reply adds a reply from user to a thread. With push, the matching
+// live event is sent, as Slack would; without, only a fetch sees it.
+func (s *Server) Reply(channel, threadTS, user, text string, push bool) slack.Message {
+	s.mu.Lock()
+	s.nextTS++
+	m := slack.Message{Type: "message", TS: fmt.Sprintf("%d.000100", s.nextTS), ThreadTS: threadTS, User: user, Text: text}
+	key := channel + "/" + threadTS
+	s.Threads[key] = append(s.Threads[key], m)
+	s.mu.Unlock()
+	if push {
+		ev := ok(m)
+		delete(ev, "ok")
+		ev["channel"] = channel
+		s.Push(ev)
+	}
+	return m
+}
+
+// Edit changes a message's text and pushes message_changed.
+func (s *Server) Edit(channel, threadTS, ts, text string) {
+	s.mu.Lock()
+	msgs := s.Threads[channel+"/"+threadTS]
+	var edited slack.Message
+	for i := range msgs {
+		if msgs[i].TS == ts {
+			msgs[i].Text = text
+			msgs[i].Edited = &struct {
+				User string `json:"user"`
+				TS   string `json:"ts"`
+			}{User: msgs[i].User, TS: ts}
+			edited = msgs[i]
+		}
+	}
+	s.mu.Unlock()
+	s.Push(map[string]any{"type": "message", "subtype": "message_changed", "channel": channel, "message": edited})
+}
+
+// React adds user's reaction to a message and pushes reaction_added.
+func (s *Server) React(channel, threadTS, ts, user, name string) {
+	s.mu.Lock()
+	msgs := s.Threads[channel+"/"+threadTS]
+	for i := range msgs {
+		if msgs[i].TS != ts {
+			continue
+		}
+		found := false
+		for j := range msgs[i].Reactions {
+			if r := &msgs[i].Reactions[j]; r.Name == name {
+				r.Count++
+				r.Users = append(r.Users, user)
+				found = true
+			}
+		}
+		if !found {
+			msgs[i].Reactions = append(msgs[i].Reactions, slack.Reaction{Name: name, Count: 1, Users: []string{user}})
+		}
+	}
+	s.mu.Unlock()
+	s.Push(map[string]any{"type": "reaction_added", "user": user, "reaction": name,
+		"item": map[string]string{"type": "message", "channel": channel, "ts": ts}})
+}
