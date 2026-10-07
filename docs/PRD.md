@@ -128,7 +128,7 @@ Same key → same meaning as ghwatch where the action exists.
 | `x` | delete selected message (yours only, asks to confirm) | — |
 | `+` | add a reaction to the selected message (emoji picker) | — |
 | `-` | remove one of your reactions | — |
-| `u` | mark thread read (locally) | — |
+| `u` | mark thread read (synced to Slack in mode B) | — |
 | `n` | toggle notifications for the current thread | same |
 | `N` | notification settings (event types, global mute) | same |
 | `a` / `d` | add / unwatch a thread | same |
@@ -180,23 +180,23 @@ slack-tabbed-tui -serve                # run the daemon in the foreground
 
 ## 5. Feasibility
 
-**Verdict: feasible**, with either a private Slack app the user creates
-in their own workspace (an "internal, customer-built" app, never
-published) and its **user token**, or a plain **SSO/browser login**
-(§5.4). Almost
-all of the thread pane can be built on public, documented APIs. The real
-risks are not technical: getting the app approved by workspace admins
-(R1), and a few Slack features that have no public API (table below; the
-SSO/browser mode reaches some of them).
+**Verdict: feasible.** Sign-in is a plain **SSO/browser login** (mode B,
+decided, see §5.4): no Slack app, nothing published, no admin approval.
+Optionally, a private app token (mode A) for users who prefer Slack's
+supported API. With the browser session the tool sees what the Slack web
+client sees, so almost every thread feature is reachable, including read
+state and following a thread. The real risk moves from "will an admin
+approve the app" to "Slack's web-client endpoints are undocumented and can
+change" (R1b).
 
 ### 5.1 How it talks to Slack
 
 | Need | API | Notes |
 | --- | --- | --- |
 | Act as the user | User OAuth token (`xoxp-`) of an app installed by the user | Messages are posted as the user, not as a bot. Reads what the user can read. |
-| Live updates | **Socket Mode** (app-level token `xapp-`, `connections:write`) + Events API subscribed *on behalf of the user*: `message.channels/groups/im/mpim`, `reaction_added/removed`, `user_change`, `team_join`, `emoji_changed`, `subteam_*` | Outbound WebSocket only: no public URL, fits a local daemon. The daemon holds one connection. |
+| Live updates | Mode B: the web client's WebSocket (`rtm.connect`, same event stream the browser gets). Mode A: **Socket Mode** (app-level token `xapp-`, `connections:write`) + Events API subscribed *on behalf of the user*: `message.channels/groups/im/mpim`, `reaction_added/removed`, `user_change`, `team_join`, `emoji_changed`, `subteam_*` | Outbound WebSocket only: no public URL, fits a local daemon. The daemon holds one connection. |
 | Fallback when no event arrives | Poll `conversations.replies` with `oldest` | Events only arrive for channels the user is a member of; a thread in a public channel the user has not joined is polled. Also used to resync after a reconnect. |
-| Read a thread | `conversations.replies` (+ `conversations.info` for the channel) | Tier 3 (~50/min) for internal apps. |
+| Read a thread | `conversations.replies` (+ `conversations.info` for the channel) | Tier 3 (~50/min) for internal apps; mode B is limited like the web client (to measure in M0). |
 | Post / reply | `chat.postMessage` with `thread_ts`, `reply_broadcast` | Supports `mrkdwn` and `blocks`. |
 | Edit / delete | `chat.update`, `chat.delete` | Own messages only, same as Slack (admins aside). |
 | Reactions | `reactions.add/remove` | |
@@ -220,6 +220,10 @@ adds it as a (new) thread.
 
 ### 5.2 Rate limits
 
+These limits apply to apps (mode A). Mode B calls the same methods with
+the web client's session; the per-method tiers still apply in practice,
+and M0 measures them. The design keeps API use low either way.
+
 Since 2025‑05‑29 Slack limits `conversations.history` and
 `conversations.replies` to **1 request/minute and 15 messages per call for
 apps distributed commercially outside the Marketplace**. Marketplace and
@@ -242,7 +246,7 @@ events; the TUI works before the first sync ends (misses fall back to
 
 | Slack feature in a thread | | How / why not |
 | --- | --- | --- |
-| Read parent + all replies, live | ✅ | Socket Mode events + `conversations.replies` |
+| Read parent + all replies, live | ✅ | WebSocket events + `conversations.replies` |
 | `@` users, **bots, apps**, groups, `@here/@channel` | ✅ | §4.3 |
 | `#` channel links, `:emoji:` completion incl. custom | ✅ | |
 | Rich text: bold/italic/strike/code/quote/lists/links | ✅ | Render `rich_text` blocks; compose in Slack markup |
@@ -257,10 +261,10 @@ events; the TUI works before the first sync ends (misses fall back to
 | Mention autocomplete ranking identical to Slack | 🟡 | Same signals we can see (participants, channel members); Slack's own ranking model is private |
 | Unfurls (link previews) | 🟡 | Shown when Slack has attached them to the message |
 | Message edited / deleted live | ✅ | `message_changed` / `message_deleted` subtypes |
-| Typing indicators ("X is typing") | ❌ | Only in the legacy RTM API, which new apps cannot use. Possible in SSO mode (§5.4) |
+| Typing indicators ("X is typing") | ✅ B / ❌ A | Mode B: `user_typing` events on the web-client WebSocket, and we can send ours. Mode A: only in the legacy RTM API, which new apps cannot use |
 | Presence dots | 🟡 | `users.getPresence` on demand; no live presence for new apps |
-| **Read/unread state synced with Slack** | ❌ | No public API marks a thread read. Unread is tracked locally; reading here doesn't clear Slack's badge (**Q3**). Possible in SSO mode (§5.4) |
-| Follow / unfollow thread in Slack | ❌ | No public API; we can only *show* whether you're subscribed when Slack tells us (`reply_users`, mentions). Possible in SSO mode (§5.4) |
+| **Read/unread state synced with Slack** | ✅ B / ❌ A | Mode B: the web client's thread-mark endpoint (undocumented), so reading here clears Slack's badge and vice versa. Mode A: tracked locally only |
+| Follow / unfollow thread in Slack | ✅ B / ❌ A | Mode B: the web client's thread-subscription endpoints (undocumented). Mode A: no public API |
 | Slash commands (`/remind`, `/giphy`, app commands) | ❌ | No public API to invoke them as a user |
 | Save for later / reminders on a message | ❌ / 🟡 | "Later" has no API; `reminders.add` exists but is limited (**Q7**) |
 | Schedule a reply | 🟡 | `chat.scheduleMessage` (P2) |
@@ -289,15 +293,18 @@ directory, no hosted server. See §6 for the steps of each.
 There is no third way: "Sign in with Slack" / OAuth also needs an app
 (A), and legacy personal tokens can no longer be created.
 
-**Proposal:** support both from v1. `auth` tries A if the user has app
-tokens, else offers B. The rest of the program is the same: only the
-client layer (how to connect, which endpoints) differs. If neither works
-in the target workspace (apps blocked *and* session login blocked by
-policy), the project is a no-go there: M0 checks this first.
+**Decision (2026‑10‑07): mode B is the primary sign-in**, accepted by the
+owner with its trade-offs (unsupported by Slack, can break, terms of the
+workspace). It is the v1 path and the one M0 validates. Mode A stays in the
+design as an optional, later path (P2): only the client layer (how to
+connect, which endpoints) differs, the rest of the program is the same.
+Features that only B has (read state, follow, typing) are on by default.
+If session login turns out to be blocked by policy in the target
+workspace, the project is a no-go there: M0 checks this first.
 
 ## 6. Authentication and setup
 
-### A. Personal app token (steps, done once per workspace)
+### A. Personal app token (optional, P2; steps, done once per workspace)
 
 1. `slack-tabbed-tui manifest` prints an app manifest (YAML) with the
    scopes below, Socket Mode on and the user events subscribed.
@@ -318,7 +325,7 @@ policy), the project is a no-go there: M0 checks this first.
 `files:write`, `team:read`, `pins:write` (P2). `users:read.email` is not
 needed.
 
-### B. SSO / browser session (no app)
+### B. SSO / browser session (primary, no app)
 
 1. `slack-tabbed-tui auth --browser <workspace URL>` opens a browser
    window (a dedicated profile, through the Chrome DevTools protocol, as
@@ -344,7 +351,7 @@ a link's host or team ID picks it.
 Same shape as ghwatch, so most of its design carries over:
 
 ```
- Slack Socket Mode (WebSocket) ─┐
+ Slack WebSocket (web client) ──┐
  Slack Web API (HTTPS) ─────────┴─▶ daemon ──▶ desktop / exec notifications
                                       │
                  snapshot.json ◀──────┤  directory cache (users, groups,
@@ -354,7 +361,7 @@ Same shape as ghwatch, so most of its design carries over:
 
 - **Daemon**: one per user, auto-started by the TUI, exits 10 s after the
   last client (or `-serve` forever), single-instance lock. Holds the
-  Socket Mode connection per workspace, routes events for watched threads,
+  WebSocket per workspace (Socket Mode in mode A), routes events for watched threads,
   polls the rest, keeps the directory cache, sends notifications, writes
   the snapshot.
 - **TUI**: renders the snapshot, sends commands (add, unwatch, post,
@@ -396,7 +403,7 @@ stale.
 | F-W3 | Optional alias per tab (`a` prompt or `# alias` in the watch file) | P2 |
 | F-R1 | Show parent and all replies, paginated, with author, time, edited marker | P0 |
 | F-R2 | Render `rich_text`, mrkdwn fallback, mentions as names, channel links, emoji | P0 |
-| F-R3 | Live new / edited / deleted messages and reactions within 5 s (Socket Mode) or 60 s (polling) | P0 |
+| F-R3 | Live new / edited / deleted messages and reactions within 5 s (WebSocket) or 60 s (polling) | P0 |
 | F-R4 | Local unread tracking per thread, "new" divider, unread counts in tabs and title | P0 |
 | F-R5 | Show bot/app messages, Block Kit approximated, attachments listed | P1 |
 | F-C1 | Compose and send replies; multi-line; drafts kept | P0 |
@@ -416,7 +423,7 @@ stale.
 ### Non-functional
 
 - Starts and shows cached content in < 200 ms.
-- Steady-state Web API use near zero with Socket Mode; never more than
+- Steady-state Web API use near zero with the WebSocket; never more than
   50 % of any method's budget; exponential backoff, honor `Retry-After`.
 - Works over a lost connection: shows stale state, reconnects, resyncs
   missed messages with `conversations.replies` (no gaps).
@@ -429,11 +436,11 @@ stale.
 
 | | Scope | Exit criteria |
 | --- | --- | --- |
-| **M0 spike** (1 wk) | Manifest, tokens, Socket Mode client, read one thread live, `users.list` with bots | Resolves R1–R3 in a real workspace (personal + an Enterprise Grid one) |
-| **M1 read-only** | Watchlist, tabs, rendering, live updates, local unread, notifications, tmux, CLI `add/rm/ls/show/status` | Daily use as a "watcher" |
+| **M0 spike** (1 wk) | Browser SSO login and session capture, WebSocket client, read one thread live, `users.list` with bots, thread-mark and subscription endpoints, measure rate limits | Works in the target workspace (incl. an Enterprise Grid one with SSO); session lifetime known |
+| **M1 read-only** | Watchlist, tabs, rendering, live updates, unread synced with Slack, notifications, tmux, CLI `add/rm/ls/show/status` | Daily use as a "watcher" |
 | **M2 reply** | Composer, `@` / `#` / `:` completion, drafts, `$EDITOR`, also-send-to-channel | Can work a thread without opening Slack |
 | **M3 parity** | Reactions, edit/delete, files, Block Kit rendering, multi-workspace | Matrix rows marked ✅ all done |
-| **M4 polish** | Inline images (graphics protocols), schedule, pins, search, OAuth flow | — |
+| **M4 polish** | Mode A (private app token), inline images (graphics protocols), schedule, pins, search, OAuth flow | — |
 
 ## 10. Risks
 
@@ -441,8 +448,8 @@ stale.
 | --- | --- | --- | --- |
 | R1 | Workspace admins don't allow user-created apps or the scopes we need | Mode A blocked for that user | Mode B (SSO login); minimal scopes and a clear manifest for the admin request |
 | R1b | Mode B stops working (web client change, session policy, terms) | Users on mode B logged out | Keep the client layer swappable; clear `logged out` state; mode A stays the supported path |
-| R2 | Slack changes limits for internal apps too | Polling-heavy design breaks | Socket Mode first, polling only as fallback; cache everything |
-| R3 | User-scoped events in Socket Mode miss some message kinds (e.g. channels not joined, Slack Connect) | Delayed updates | Detect per thread and poll; show `polling` on the tab |
+| R2 | Slack tightens limits for the web-client session or internal apps | Polling-heavy design breaks | WebSocket first, polling only as fallback; cache everything |
+| R3 | WebSocket events miss some message kinds (e.g. channels not joined, Slack Connect) | Delayed updates | Detect per thread and poll; show `polling` on the tab |
 | R4 | "Parity" expectations exceed the API (read state, slash commands, buttons) | Disappointment | Matrix in §5.3 agreed up front; `o` to jump to Slack for the rest |
 | R5 | Enterprise policies: token lifetime, IP allowlists, session expiry | Auth breaks often | Token rotation support; clear `auth` error states |
 | R6 | Huge directories (100k users) | Slow first sync, memory | Disk cache, incremental updates, lazy `users.info` |
@@ -450,13 +457,20 @@ stale.
 
 ## 11. Open questions
 
+### Resolved
+
+| # | Question | Decision |
+| --- | --- | --- |
+| Q2 | Which sign-in mode? | **Mode B (SSO/browser session)** is the primary path; mode A optional, P2 (2026‑10‑07) |
+| Q3 | Unread state can't sync with Slack in mode A; local-only? | Moot for v1: mode B syncs read state with Slack |
+
+### Open
+
 | # | Question | Proposal |
 | --- | --- | --- |
-| Q1 | Mode A: one shared distributed app, or each user creates their own private one from the manifest? | Own app: no 1 req/min limit, no hosted OAuth, no Marketplace review |
-| Q2 | Ship both sign-in modes (§5.4), or only one? With B, use its extra features (read state sync, follow, typing)? | Both; B's extras behind a setting, off by default |
-| Q3 | Unread state can't sync with Slack. Is local-only unread acceptable? | Yes; `u` marks read locally |
+| Q1 | Mode A (P2): one shared distributed app, or each user creates their own private one from the manifest? | Own app: no 1 req/min limit, no hosted OAuth, no Marketplace review |
 | Q4 | Stay standard-library only (write a small RFC 6455 client) or use `slack-go/slack` + its `socketmode`? | Own small client, in line with ghwatch; `slack-go` as fallback if M0 shows edge cases |
-| Q5 | Mode A: token paste vs. guided OAuth with a local redirect? | Paste in v1 (OAuth still needs the same app, it only saves copying) |
+| Q5 | Mode A (P2): token paste vs. guided OAuth with a local redirect? | Paste in v1 (OAuth still needs the same app, it only saves copying) |
 | Q6 | Inline images in the terminal: worth it? | P2, behind a setting, kitty + sixel |
 | Q7 | Which of "save for later / remind me / schedule" matter? | Schedule only (P2) |
 | Q8 | Separate binary, or a `thread` item kind inside ghwatch (its `kind.Kind` is the seam)? | Separate app sharing code: the composer and directory cache don't fit ghwatch's "checks" model |
