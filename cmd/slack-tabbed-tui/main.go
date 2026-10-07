@@ -1,12 +1,15 @@
 // Command slack-tabbed-tui follows a hand-picked set of Slack threads
 // from the terminal.
 //
+//	slack-tabbed-tui                          open the tabbed TUI
+//	slack-tabbed-tui -serve                   run the daemon in the foreground
 //	slack-tabbed-tui auth [<workspace URL>]   sign in, or check sessions
 //	slack-tabbed-tui add <link>...            watch threads
 //	slack-tabbed-tui rm <link>...             stop watching threads
 //	slack-tabbed-tui ls                       list watched threads
 //	slack-tabbed-tui show <link>              print a thread, fetched now
 //	slack-tabbed-tui reply <link> [text|-]    post a reply
+//	slack-tabbed-tui status [-json]           one-line summary for tmux
 package main
 
 import (
@@ -24,17 +27,27 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"text/tabwriter"
+	"text/template"
 	"time"
 
+	"github.com/clobrano/slack-tabbed-tui/internal/browser"
 	"github.com/clobrano/slack-tabbed-tui/internal/config"
 	"github.com/clobrano/slack-tabbed-tui/internal/creds"
+	"github.com/clobrano/slack-tabbed-tui/internal/daemon"
 	"github.com/clobrano/slack-tabbed-tui/internal/directory"
+	"github.com/clobrano/slack-tabbed-tui/internal/ipc"
 	"github.com/clobrano/slack-tabbed-tui/internal/login"
+	"github.com/clobrano/slack-tabbed-tui/internal/model"
+	"github.com/clobrano/slack-tabbed-tui/internal/notify"
 	"github.com/clobrano/slack-tabbed-tui/internal/slack"
+	"github.com/clobrano/slack-tabbed-tui/internal/tui"
 	"github.com/clobrano/slack-tabbed-tui/internal/watchlist"
 )
 
 const usage = `Usage:
+  slack-tabbed-tui                          open the tabbed TUI
+  slack-tabbed-tui -serve                   run the daemon in the foreground
   slack-tabbed-tui auth                     list sessions and check they still work
   slack-tabbed-tui auth <workspace URL>     sign in to a workspace, in a browser window
   slack-tabbed-tui auth -manual <URL>       sign in by pasting the token and cookie
@@ -44,13 +57,15 @@ const usage = `Usage:
   slack-tabbed-tui ls                       list watched threads
   slack-tabbed-tui show <link>              print a thread, fetched now
   slack-tabbed-tui reply <link> [text|-]    post a reply (text from args, or stdin)
+  slack-tabbed-tui status [-json]           one-line summary, e.g. for tmux status-right
 
-The TUI is not there yet: see docs/PRD.md for the plan.
+Flags:
 `
 
 // app holds what the commands need, so tests can swap it.
 type app struct {
 	paths config.Paths
+	cfg   config.Config
 	store creds.Store
 	in    io.Reader
 	out   io.Writer
@@ -63,11 +78,21 @@ type app struct {
 func main() {
 	log.SetFlags(0)
 	log.SetPrefix("slack-tabbed-tui: ")
-	flag.Usage = func() { fmt.Fprint(flag.CommandLine.Output(), usage) }
+	serve := flag.Bool("serve", false, "run the daemon in the foreground")
+	idleExit := flag.Duration("idle-exit", 0, "with -serve: exit after this long without clients (0: never)")
+	flag.Usage = func() {
+		fmt.Fprint(flag.CommandLine.Output(), usage)
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 	paths := config.DefaultPaths()
+	cfg, err := config.Load(paths.ConfigFile())
+	if err != nil {
+		log.Fatal(err)
+	}
 	a := &app{
 		paths:  paths,
+		cfg:    cfg,
 		store:  creds.Store{Path: paths.Credentials(), Secrets: creds.NewSecretTool()},
 		in:     os.Stdin,
 		out:    os.Stdout,
@@ -87,9 +112,52 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := a.run(ctx, flag.Args()); err != nil {
+	switch {
+	case *serve:
+		err = a.serve(ctx, *idleExit)
+	case flag.NArg() == 0:
+		stop() // the TUI reads ctrl-c as a key
+		err = tui.Run(context.Background(), tui.Options{Paths: paths, Config: cfg})
+	default:
+		err = a.run(ctx, flag.Args())
+	}
+	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (a *app) serve(ctx context.Context, idleExit time.Duration) error {
+	d := &daemon.Daemon{
+		Paths:    a.paths,
+		Config:   a.cfg,
+		Store:    a.store,
+		Client:   a.client,
+		IdleExit: idleExit,
+		Log:      log.New(os.Stderr, "slack-tabbed-tui: ", log.LstdFlags),
+	}
+	switch a.cfg.Notifier {
+	case "desktop", "":
+		d.Notifier = &notify.Desktop{Open: func(url string) error { return browser.Open(a.cfg.Browser, url) }}
+	case "exec":
+		if a.cfg.NotifyCommand == "" {
+			return errors.New(`notifier "exec" needs notify_command in config.toml`)
+		}
+		d.Notifier = notify.Exec{Command: a.cfg.NotifyCommand}
+	case "none":
+		d.Notifier = notify.Nop{}
+	default:
+		return fmt.Errorf("unknown notifier %q (want desktop, exec or none)", a.cfg.Notifier)
+	}
+	return d.Run(ctx)
+}
+
+// dial connects to a running daemon, or returns nil.
+func (a *app) dial() *ipc.Client {
+	c, err := ipc.Dial(a.paths.Socket())
+	if err != nil {
+		return nil
+	}
+	return c
 }
 
 func (a *app) run(ctx context.Context, args []string) error {
@@ -102,15 +170,17 @@ func (a *app) run(ctx context.Context, args []string) error {
 	case "auth":
 		return a.cmdAuth(ctx, args)
 	case "add":
-		return a.cmdAdd(args)
+		return a.cmdAdd(ctx, args)
 	case "rm", "remove":
-		return a.cmdRemove(args)
+		return a.cmdRemove(ctx, args)
 	case "ls", "list":
 		return a.cmdList()
 	case "show":
 		return a.cmdShow(ctx, args)
 	case "reply":
 		return a.cmdReply(ctx, args)
+	case "status":
+		return a.cmdStatus(args)
 	case "help", "-h", "--help":
 		fmt.Fprint(a.out, usage)
 		return nil
@@ -281,9 +351,23 @@ func (a *app) parseID(s string) (string, error) {
 	return r.ID(), err
 }
 
-func (a *app) cmdAdd(args []string) error {
+func (a *app) cmdAdd(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: slack-tabbed-tui add <link>...")
+	}
+	if c := a.dial(); c != nil {
+		// The daemon checks the thread and updates every client.
+		defer c.Close()
+		var errs []error
+		for _, s := range args {
+			info, err := c.Do(ctx, ipc.Command{Op: ipc.OpAdd, ID: s})
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			fmt.Fprintln(a.out, info)
+		}
+		return errors.Join(errs...)
 	}
 	for _, s := range args {
 		id, err := a.parseID(s)
@@ -303,14 +387,26 @@ func (a *app) cmdAdd(args []string) error {
 	return nil
 }
 
-func (a *app) cmdRemove(args []string) error {
+func (a *app) cmdRemove(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: slack-tabbed-tui rm <link>...")
+	}
+	c := a.dial()
+	if c != nil {
+		defer c.Close()
 	}
 	for _, s := range args {
 		id, err := a.parseID(s)
 		if err != nil {
 			return fmt.Errorf("%s: %w", s, err)
+		}
+		if c != nil {
+			info, err := c.Do(ctx, ipc.Command{Op: ipc.OpUnwatch, ID: id})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(a.out, info)
+			continue
 		}
 		changed, err := watchlist.Remove(a.paths.Watchlist(), id, a.parseID)
 		if err != nil {
@@ -332,11 +428,83 @@ func (a *app) cmdList() error {
 	for _, e := range bad {
 		fmt.Fprintln(os.Stderr, "warning:", e)
 	}
+	snap, _ := daemon.ReadSnapshot(a.paths.Snapshot())
+	tw := tabwriter.NewWriter(a.out, 0, 4, 2, ' ', 0)
 	for _, id := range ids {
 		r, _ := slack.ParseRef(id)
-		fmt.Fprintf(a.out, "%s\t%s\n", id, r.Permalink())
+		var t *model.Thread
+		if snap != nil {
+			t = snap.Find(id)
+		}
+		if t == nil || len(t.Messages) == 0 {
+			fmt.Fprintf(tw, "%s\t\t%s\n", id, r.Permalink())
+			continue
+		}
+		u, _ := t.Unread()
+		title := []rune(t.Title())
+		if len(title) > 50 {
+			title = append(title[:49], '…')
+		}
+		where := "#" + t.ChannelName
+		if t.IsDM {
+			where = "@" + t.ChannelName
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d unread\t%s\n", id, where, u, string(title))
 	}
-	return nil
+	return tw.Flush()
+}
+
+// StatusData is the data available to the status template.
+type StatusData struct {
+	Threads, Unread, Mentions int
+	Stale                     bool
+}
+
+func (a *app) cmdStatus(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "print the whole snapshot as JSON")
+	format := fs.String("format", "", "text/template for the summary (default from config)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *asJSON {
+		data, err := os.ReadFile(a.paths.Snapshot())
+		if err != nil {
+			return err
+		}
+		_, err = a.out.Write(data)
+		return err
+	}
+	tmpl := a.cfg.StatusTemplate
+	if *format != "" {
+		tmpl = *format
+	}
+	t, err := template.New("status").Parse(tmpl)
+	if err != nil {
+		return fmt.Errorf("status template: %w", err)
+	}
+	var data StatusData
+	snap, err := daemon.ReadSnapshot(a.paths.Snapshot())
+	if err != nil {
+		data.Stale = true
+	} else {
+		data.Threads = len(snap.Threads)
+		for _, th := range snap.Threads {
+			u, mn := th.Unread()
+			data.Unread += u
+			data.Mentions += mn
+		}
+		data.Stale = !daemon.Running(a.paths.Lock())
+		for _, w := range snap.Workspaces {
+			data.Stale = data.Stale || w.Conn == model.ConnLoggedOut || w.Conn == model.ConnNoSession
+		}
+	}
+	var b strings.Builder
+	if err := t.Execute(&b, data); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(a.out, strings.TrimSpace(b.String()))
+	return err
 }
 
 // session returns the client and the directory for a thread's workspace.

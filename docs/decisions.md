@@ -53,3 +53,39 @@ ghwatch's `docs/decisions.md`.
 - **Outgoing text** is escaped (`&`, `<`, `>`) as Slack requires. Typed
   `@name` mentions are not converted to `<@U…>` yet: that comes with
   the composer and its completion.
+
+## Daemon and TUI
+
+- **Same architecture as ghwatch**: one daemon per user owns the Slack
+  connections and the state; TUIs talk to it over a Unix socket (NDJSON)
+  and get a fresh snapshot after every change. The IPC, lock, spawn,
+  notifier, browser and terminal code are ghwatch's, adapted.
+- **Fetching**: an event in a watched thread (a new reply, an edit, a
+  deletion, a reaction) triggers a fetch of the whole thread with
+  `conversations.replies`, after a 300 ms debounce, rather than patching
+  the state from the event. One call per burst of events keeps the
+  state exact (edits, deletions, reaction counts) with little code.
+  After every (re)connection every thread of the workspace is fetched
+  again; threads of a workspace without a live connection are fetched
+  every `interval` (60 s); everything is re-fetched every 5 minutes as a
+  safety net.
+- **The snapshot carries the messages**, already rendered (names
+  resolved, markup turned into text), so TUIs need no Slack code and
+  show the last state at once. The PRD planned bodies in a separate
+  cache; one file (mode 0600) is simpler and small for a curated list.
+- **Unread** is tracked by the daemon (`read_ts` per thread), shared by
+  every client: a newly added thread starts read, your own messages are
+  never unread, a thread counts as read after 1.5 s on screen (or `u`),
+  and replying marks it read up to your message. Syncing read state with
+  Slack is still to do (it needs the web client's thread-mark endpoint).
+- **Notifications** come from comparing each fetch with the previous
+  one: a new reply from someone else (a mention when it names you,
+  @here, @channel or @everyone), and, if enabled, more people reacting
+  to one of your messages. Only threads with alerts on (`n`) notify.
+- **User groups** are loaded once per daemon start (`usergroups.list`)
+  so `@team` mentions show their handle.
+- **`enter` opens the selected message in Slack** (as it opens the job
+  in ghwatch). The PRD had it expand long messages; messages are always
+  shown whole instead.
+- **Composer**: plain text is escaped for Slack on send. `@` / `#` / `:`
+  completion, which will insert real mentions, is the next step.

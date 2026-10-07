@@ -127,6 +127,22 @@ func (d *Directory) Sync(ctx context.Context, api API) error {
 	return nil
 }
 
+// SyncGroups replaces the user groups with the list from Slack: one
+// call, so @team mentions show their handles.
+func (d *Directory) SyncGroups(ctx context.Context, api API) error {
+	groups, err := api.UserGroups(ctx)
+	if err != nil {
+		return err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.groups = make(map[string]slack.UserGroup, len(groups))
+	for _, g := range groups {
+		d.groups[g.ID] = g
+	}
+	return nil
+}
+
 // Resolve fetches the users and channels that are not cached yet. It
 // keeps going on errors and returns the first one.
 func (d *Directory) Resolve(ctx context.Context, api API, userIDs, channelIDs []string) error {

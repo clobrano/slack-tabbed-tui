@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/clobrano/slack-tabbed-tui/internal/config"
 	"github.com/clobrano/slack-tabbed-tui/internal/creds"
+	"github.com/clobrano/slack-tabbed-tui/internal/daemon"
 	"github.com/clobrano/slack-tabbed-tui/internal/login"
+	"github.com/clobrano/slack-tabbed-tui/internal/model"
 	"github.com/clobrano/slack-tabbed-tui/internal/slack"
 	"github.com/clobrano/slack-tabbed-tui/internal/slack/slacktest"
 )
@@ -45,6 +48,7 @@ func testApp(t *testing.T) (*app, *slacktest.Server, *bytes.Buffer) {
 	out := &bytes.Buffer{}
 	a := &app{
 		paths:  paths,
+		cfg:    config.Default(),
 		store:  creds.Store{Path: paths.Credentials()},
 		in:     strings.NewReader(""),
 		out:    out,
@@ -152,8 +156,8 @@ func TestWatchlist(t *testing.T) {
 	if err := a.run(ctx, []string{"ls"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := out.String(); got != threadID+"\t"+parentLink+"\n" {
-		t.Errorf("ls = %q", got)
+	if f := strings.Fields(out.String()); len(f) != 2 || f[0] != threadID || f[1] != parentLink {
+		t.Errorf("ls = %q", out)
 	}
 	if err := a.run(ctx, []string{"rm", appLink}); err != nil {
 		t.Fatal(err)
@@ -259,5 +263,39 @@ func TestAuthBrowser(t *testing.T) {
 	a.in = strings.NewReader(slacktest.Token + "\n" + slacktest.Cookie + "\n")
 	if err := a.run(context.Background(), []string{"auth", "-manual", "acme"}); err != nil {
 		t.Errorf("-manual: %v", err)
+	}
+}
+
+func TestStatus(t *testing.T) {
+	a, _, out := testApp(t)
+	if err := a.run(context.Background(), []string{"status"}); err != nil || out.String() != "!\n" {
+		t.Errorf("no snapshot: %q %v", out, err)
+	}
+	snap := &model.Snapshot{Threads: []model.Thread{{
+		ID: threadID, ChannelName: "general", ReadTS: "1700000000.000100",
+		Messages: []model.Message{{TS: "1700000000.000100", Text: "Deploy is stuck"}, {TS: "1700000100.000100", Text: "hi", MentionsMe: true}, {TS: "1700000200.000100", Text: "x"}},
+	}}}
+	if err := os.MkdirAll(a.paths.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemon.WriteSnapshot(a.paths.Snapshot(), snap); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	// No daemon running: the data is stale.
+	if err := a.run(context.Background(), []string{"status"}); err != nil || out.String() != "💬 ●2 @1!\n" {
+		t.Errorf("status = %q %v", out, err)
+	}
+	out.Reset()
+	if err := a.run(context.Background(), []string{"status", "-format", "{{.Threads}} {{.Unread}}"}); err != nil || out.String() != "1 2\n" {
+		t.Errorf("custom format = %q %v", out, err)
+	}
+	out.Reset()
+	if err := a.run(context.Background(), []string{"add", parentLink}); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := a.run(context.Background(), []string{"ls"}); err != nil || !strings.Contains(out.String(), "#general  2 unread  Deploy is stuck") {
+		t.Errorf("ls with snapshot = %q %v", out, err)
 	}
 }

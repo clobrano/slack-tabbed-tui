@@ -706,6 +706,9 @@ func (d *Daemon) stream(ctx context.Context, sp *space) {
 			d.mu.Unlock()
 		}
 	}
+	if err := sp.dir.SyncGroups(ctx, sp.client); err != nil && ctx.Err() == nil {
+		d.Log.Printf("%s: user groups: %v", sp.host, err)
+	}
 	st := &slack.Stream{
 		Client: sp.client,
 		OnState: func(s slack.StreamState, err error) {

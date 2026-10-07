@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/clobrano/slack-tabbed-tui/internal/slack"
 	"github.com/clobrano/slack-tabbed-tui/internal/ws"
@@ -50,7 +51,7 @@ func New() *Server {
 	s := &Server{
 		Convs:        map[string]slack.Conversation{},
 		Threads:      map[string][]slack.Message{},
-		nextTS:       1800000000,
+		nextTS:       time.Now().Unix(),
 		SocketOpened: make(chan struct{}, 16),
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
