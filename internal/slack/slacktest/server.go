@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/clobrano/slack-tabbed-tui/internal/slack"
+	"github.com/clobrano/slack-tabbed-tui/internal/ws"
 )
 
 // Session is the only token and cookie the server accepts.
@@ -37,14 +38,20 @@ type Server struct {
 	RateLimit int
 	Calls     []string // methods called, in order
 	nextTS    int64
+
+	sockMu  sync.Mutex
+	sockets []*ws.Conn
+	// SocketOpened receives a value each time an event socket connects.
+	SocketOpened chan struct{}
 }
 
 // New starts a fake workspace with a signed-in user "me" (U0ME).
 func New() *Server {
 	s := &Server{
-		Convs:   map[string]slack.Conversation{},
-		Threads: map[string][]slack.Message{},
-		nextTS:  1800000000,
+		Convs:        map[string]slack.Conversation{},
+		Threads:      map[string][]slack.Message{},
+		nextTS:       1800000000,
+		SocketOpened: make(chan struct{}, 16),
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	s.Auth = slack.AuthInfo{URL: s.URL + "/", Team: "Acme", TeamID: "T0ACME", User: "me", UserID: "U0ME"}
@@ -84,7 +91,63 @@ func (s *Server) CallCount(method string) int {
 	return n
 }
 
+// Push sends an event to every connected event socket.
+func (s *Server) Push(event any) {
+	s.sockMu.Lock()
+	defer s.sockMu.Unlock()
+	for _, c := range s.sockets {
+		_ = c.WriteJSON(event)
+	}
+}
+
+// DropSockets closes every event socket, as a network failure would.
+func (s *Server) DropSockets() {
+	s.sockMu.Lock()
+	defer s.sockMu.Unlock()
+	for _, c := range s.sockets {
+		c.Close()
+	}
+	s.sockets = nil
+}
+
+// serveSocket is the event stream: "hello", then pushed events; pings
+// are answered with pongs.
+func (s *Server) serveSocket(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie("d"); err != nil || c.Value != Cookie || r.URL.Query().Get("t") != Token {
+		http.Error(w, "invalid_auth", http.StatusUnauthorized)
+		return
+	}
+	c, err := ws.Accept(w, r)
+	if err != nil {
+		return
+	}
+	s.sockMu.Lock()
+	_ = c.WriteJSON(map[string]string{"type": "hello"})
+	s.sockets = append(s.sockets, c)
+	s.sockMu.Unlock()
+	s.SocketOpened <- struct{}{}
+	for {
+		_, data, err := c.ReadMessage()
+		if err != nil {
+			return
+		}
+		var ping struct {
+			ID   int    `json:"id"`
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(data, &ping) == nil && ping.Type == "ping" {
+			s.sockMu.Lock()
+			_ = c.WriteJSON(map[string]any{"type": "pong", "reply_to": ping.ID})
+			s.sockMu.Unlock()
+		}
+	}
+}
+
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/websocket" {
+		s.serveSocket(w, r)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	method := strings.TrimPrefix(r.URL.Path, "/api/")
@@ -142,6 +205,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case "users.list":
 		page, next := s.page(len(s.Users), f.Get("cursor"))
 		reply(w, withCursor(map[string]any{"members": s.Users[page[0]:page[1]]}, next))
+	case "rtm.connect":
+		reply(w, ok(map[string]any{
+			"url":  "ws" + strings.TrimPrefix(s.URL, "http") + "/websocket?t=" + Token,
+			"self": map[string]string{"id": s.Auth.UserID, "name": s.Auth.User},
+			"team": map[string]string{"id": s.Auth.TeamID, "domain": "acme"},
+		}))
 	case "usergroups.list":
 		reply(w, ok(map[string]any{"usergroups": s.Groups}))
 	case "chat.postMessage":
@@ -157,6 +226,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		s.Threads[key] = append(s.Threads[key], m)
 		reply(w, ok(map[string]any{"channel": f.Get("channel"), "ts": m.TS, "message": m}))
+		ev := ok(m)
+		delete(ev, "ok")
+		ev["channel"] = f.Get("channel")
+		go s.Push(ev)
 	default:
 		reply(w, fail("unknown_method"))
 	}
