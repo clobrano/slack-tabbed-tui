@@ -219,7 +219,7 @@ to a reply (then the thread is `thread_ts`), Enterprise Grid hosts
 A link to a reply adds its thread; a link to a message with no replies yet
 adds it as a (new) thread.
 
-**Item ID**, ghwatch style: `thread:<team>/<channel>/<thread_ts>`.
+**Item ID**, ghwatch style: `thread:<workspace host>/<channel>/<thread_ts>` (see decisions.md).
 
 ### 5.2 Rate limits
 
