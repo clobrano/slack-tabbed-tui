@@ -22,8 +22,24 @@ type Credential struct {
 	EnterpriseID string `json:"enterprise_id,omitempty"`
 	UserID       string `json:"user_id"`
 	User         string `json:"user"`
-	Token        string `json:"token"`  // xoxc-…
-	Cookie       string `json:"cookie"` // the d cookie, xoxd-…
+	Token        string `json:"token,omitempty"`  // xoxc-…
+	Cookie       string `json:"cookie,omitempty"` // the d cookie, xoxd-…
+	// Keyring is true when Token and Cookie are kept in the keyring
+	// rather than in the file.
+	Keyring bool `json:"keyring,omitempty"`
+}
+
+// key names the secret of a session in the keyring.
+func (c Credential) key() string {
+	if c.TeamID != "" {
+		return c.TeamID
+	}
+	return c.Workspace
+}
+
+type secret struct {
+	Token  string `json:"token"`
+	Cookie string `json:"cookie"`
 }
 
 // Environment variables that override the stored session.
@@ -35,15 +51,39 @@ const (
 // ErrNoSession means there is no session for the workspace.
 var ErrNoSession = errors.New("not signed in")
 
-// Store keeps the sessions in a JSON file with mode 0600.
+// Store keeps the sessions in a JSON file with mode 0600; with Secrets
+// set, the tokens and cookies go to the keyring instead.
 type Store struct {
-	Path string
+	Path    string
+	Secrets Secrets
 	// Getenv reads the environment; nil means os.Getenv.
 	Getenv func(string) string
 }
 
-// All returns the stored sessions.
+// All returns the stored sessions, with their secrets read from the
+// keyring. A session whose secret cannot be read has an empty Token.
 func (s Store) All() ([]Credential, error) {
+	all, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	for i, c := range all {
+		if !c.Keyring || s.Secrets == nil {
+			continue
+		}
+		raw, err := s.Secrets.Get(c.key())
+		if err != nil {
+			continue
+		}
+		var sec secret
+		if json.Unmarshal([]byte(raw), &sec) == nil {
+			all[i].Token, all[i].Cookie = sec.Token, sec.Cookie
+		}
+	}
+	return all, nil
+}
+
+func (s Store) load() ([]Credential, error) {
 	data, err := os.ReadFile(s.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -81,13 +121,19 @@ func (s Store) Lookup(workspace string) (Credential, error) {
 	if err != nil {
 		return Credential{}, err
 	}
+	found := func(c Credential) (Credential, error) {
+		if c.Token == "" {
+			return c, fmt.Errorf("%w to %s: the session is not in the keyring any more; run `slack-tabbed-tui auth %s`", ErrNoSession, c.Workspace, c.URL)
+		}
+		return c, nil
+	}
 	for _, c := range all {
 		if strings.EqualFold(c.Workspace, workspace) || c.TeamID == workspace {
-			return c, nil
+			return found(c)
 		}
 	}
 	if len(all) == 1 {
-		return all[0], nil
+		return found(all[0])
 	}
 	return Credential{}, fmt.Errorf("%w to %s: run `slack-tabbed-tui auth https://%s`", ErrNoSession, workspace, hostHint(workspace))
 }
@@ -106,7 +152,15 @@ func (s Store) Save(c Credential) error {
 			c.Workspace = strings.ToLower(u.Hostname())
 		}
 	}
-	all, err := s.All()
+	c.Keyring = false
+	if s.Secrets != nil {
+		data, _ := json.Marshal(secret{Token: c.Token, Cookie: c.Cookie})
+		if s.Secrets.Set(c.key(), string(data)) == nil {
+			c.Token, c.Cookie, c.Keyring = "", "", true
+		}
+		// Otherwise the file keeps them, as without a keyring.
+	}
+	all, err := s.load()
 	if err != nil {
 		return err
 	}
@@ -126,7 +180,7 @@ func (s Store) Save(c Credential) error {
 // Remove forgets the session for a workspace (host or team ID). It
 // reports whether one was stored.
 func (s Store) Remove(workspace string) (bool, error) {
-	all, err := s.All()
+	all, err := s.load()
 	if err != nil {
 		return false, err
 	}
@@ -134,6 +188,8 @@ func (s Store) Remove(workspace string) (bool, error) {
 	for _, c := range all {
 		if !strings.EqualFold(c.Workspace, workspace) && c.TeamID != workspace {
 			kept = append(kept, c)
+		} else if c.Keyring && s.Secrets != nil {
+			_ = s.Secrets.Delete(c.key())
 		}
 	}
 	if len(kept) == len(all) {

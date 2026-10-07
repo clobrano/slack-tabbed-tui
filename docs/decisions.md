@@ -19,13 +19,29 @@ ghwatch's `docs/decisions.md`.
 - **API host**: calls go to the workspace's own host
   (`https://acme.slack.com/api/…`), as the web client does, with the
   token in the form body and the `d` cookie in the header.
-- **Session storage**: a JSON file, mode 0600, for now. The PRD asks for
-  the OS keyring first; that comes with the browser-driven login.
-  `$SLACK_TOKEN` + `$SLACK_COOKIE` override the file.
-- **Sign-in, first version**: the token and cookie are pasted by hand
-  (the PRD's fallback). `auth` checks them with `auth.test` before
-  storing them, and `auth` with no argument re-checks every session and
-  reports the ones Slack logged out.
+- **Session storage**: the token and cookie go to the desktop keyring
+  through libsecret's `secret-tool` (no D-Bus code in the binary, as
+  ghwatch uses `notify-send`). The credentials file keeps the rest
+  (workspace, team, user). Without `secret-tool` or a D-Bus session, or
+  when the keyring refuses, the file (mode 0600) holds the secrets too.
+  `$SLACK_TOKEN` + `$SLACK_COOKIE` override both.
+- **Sign-in (Q11)**: `auth <URL>` starts a Chromium-based browser with a
+  profile of its own (`$XDG_STATE_HOME/slack-tabbed-tui/browser`, kept so
+  SSO remembers you next time) and the DevTools protocol on a random
+  port. Every second it reads the `d` cookie (`Storage.getCookies`) and,
+  in each Slack page, the web client's `localStorage.localConfig_v2`,
+  which lists the signed-in teams with their `xoxc-` tokens. Once both
+  are there it closes the browser. It never touches the user's own
+  browser profiles. Firefox is not supported: it no longer speaks the
+  DevTools protocol. `auth -manual` (and no browser found) falls back to
+  pasting the token and cookie. Either way, `auth.test` checks the
+  session before it is stored.
+- **Live updates**: `rtm.connect` and the WebSocket URL it returns, with
+  the `d` cookie in the handshake. The stream pings every 30 s, treats
+  60 s of silence as a dead connection, reconnects with backoff (1 s to
+  5 min, honouring `Retry-After`), and emits `stt_connected` after every
+  connection so the daemon re-fetches what it may have missed. An
+  invalid session ends the stream (logged out) instead of retrying.
 - **One session, any workspace**: with a single stored session, links to
   any host use it. Enterprise Grid links use the org host
   (`acme.enterprise.slack.com`), which `auth.test` does not report.

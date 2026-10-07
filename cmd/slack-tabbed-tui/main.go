@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -28,13 +29,15 @@ import (
 	"github.com/clobrano/slack-tabbed-tui/internal/config"
 	"github.com/clobrano/slack-tabbed-tui/internal/creds"
 	"github.com/clobrano/slack-tabbed-tui/internal/directory"
+	"github.com/clobrano/slack-tabbed-tui/internal/login"
 	"github.com/clobrano/slack-tabbed-tui/internal/slack"
 	"github.com/clobrano/slack-tabbed-tui/internal/watchlist"
 )
 
 const usage = `Usage:
   slack-tabbed-tui auth                     list sessions and check they still work
-  slack-tabbed-tui auth <workspace URL>     sign in to a workspace
+  slack-tabbed-tui auth <workspace URL>     sign in to a workspace, in a browser window
+  slack-tabbed-tui auth -manual <URL>       sign in by pasting the token and cookie
   slack-tabbed-tui auth -rm <workspace>     forget a workspace's session
   slack-tabbed-tui add <link>...            watch threads (a message link from Slack)
   slack-tabbed-tui rm <link>...             stop watching threads
@@ -53,6 +56,8 @@ type app struct {
 	out   io.Writer
 	// client builds an API client for a session.
 	client func(c creds.Credential) *slack.Client
+	// login signs in through a browser.
+	login func(ctx context.Context, workspaceURL string) (login.Session, error)
 }
 
 func main() {
@@ -63,10 +68,22 @@ func main() {
 	paths := config.DefaultPaths()
 	a := &app{
 		paths:  paths,
-		store:  creds.Store{Path: paths.Credentials()},
+		store:  creds.Store{Path: paths.Credentials(), Secrets: creds.NewSecretTool()},
 		in:     os.Stdin,
 		out:    os.Stdout,
 		client: func(c creds.Credential) *slack.Client { return slack.New(c.URL, c.Token, c.Cookie) },
+		login: func(ctx context.Context, workspaceURL string) (login.Session, error) {
+			bin, err := login.FindBrowser()
+			if err != nil {
+				return login.Session{}, err
+			}
+			ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+			defer cancel()
+			return login.Login(ctx, workspaceURL, login.Options{
+				Launch:   login.ExecLauncher(bin, filepath.Join(paths.StateDir, "browser")),
+				Progress: func(m string) { fmt.Fprintln(os.Stdout, m) },
+			})
+		},
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -112,9 +129,11 @@ func (a *app) cmdAuth(ctx context.Context, args []string) error {
 		}
 		return err
 	case len(args) == 1:
-		return a.authSignIn(ctx, args[0])
+		return a.authSignIn(ctx, args[0], false)
+	case len(args) == 2 && args[0] == "-manual":
+		return a.authSignIn(ctx, args[1], true)
 	}
-	return errors.New("usage: slack-tabbed-tui auth [<workspace URL> | -rm <workspace>]")
+	return errors.New("usage: slack-tabbed-tui auth [[-manual] <workspace URL> | -rm <workspace>]")
 }
 
 func (a *app) authCheck(ctx context.Context) error {
@@ -140,15 +159,35 @@ func (a *app) authCheck(ctx context.Context) error {
 	return nil
 }
 
-// authSignIn stores a browser session for a workspace. For now the token
-// and cookie are copied by hand from the browser (PRD §6, manual
-// fallback); the browser-driven login comes next.
-func (a *app) authSignIn(ctx context.Context, workspace string) error {
+// authSignIn stores a browser session for a workspace: from a login in a
+// browser window the app opens, or with -manual (or no browser found)
+// from a token and cookie the user copies from their own browser.
+func (a *app) authSignIn(ctx context.Context, workspace string, manual bool) error {
 	host := workspaceHost(workspace)
 	if host == "" {
 		return fmt.Errorf("%q is not a workspace URL, e.g. https://acme.slack.com", workspace)
 	}
 	token, cookie := os.Getenv(creds.EnvToken), os.Getenv(creds.EnvCookie)
+	if (token == "" || cookie == "") && !manual {
+		s, err := a.login(ctx, "https://"+host+"/")
+		switch {
+		case errors.Is(err, login.ErrNoBrowser):
+			fmt.Fprintf(a.out, "%v: sign in by hand instead.\n\n", err)
+		case err != nil:
+			return fmt.Errorf("browser sign-in: %w (try `slack-tabbed-tui auth -manual %s`)", err, host)
+		default:
+			team, err := s.Pick(host)
+			if err != nil {
+				return err
+			}
+			token, cookie = team.Token, s.Cookie
+			for _, other := range s.Teams {
+				if other.ID != team.ID {
+					fmt.Fprintf(a.out, "The browser is also signed in to %s: run `slack-tabbed-tui auth %s` to use it too.\n", other.Host(), other.Host())
+				}
+			}
+		}
+	}
 	if token == "" || cookie == "" {
 		fmt.Fprintf(a.out, `Sign in to https://%s in your browser, then open its developer tools:
   token:  in the Console, run  JSON.parse(localStorage.localConfig_v2).teams
@@ -185,7 +224,11 @@ func (a *app) authSignIn(ctx context.Context, workspace string) error {
 	if err := a.store.Save(c); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.out, "Signed in to %s (%s) as %s.\n", c.Team, c.Workspace, c.User)
+	where := a.store.Path
+	if saved, err := a.store.Lookup(c.TeamID); err == nil && saved.Keyring {
+		where = "the keyring"
+	}
+	fmt.Fprintf(a.out, "Signed in to %s (%s) as %s. The session is stored in %s.\n", c.Team, c.Workspace, c.User, where)
 	return nil
 }
 

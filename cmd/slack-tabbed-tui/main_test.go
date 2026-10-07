@@ -8,6 +8,7 @@ import (
 
 	"github.com/clobrano/slack-tabbed-tui/internal/config"
 	"github.com/clobrano/slack-tabbed-tui/internal/creds"
+	"github.com/clobrano/slack-tabbed-tui/internal/login"
 	"github.com/clobrano/slack-tabbed-tui/internal/slack"
 	"github.com/clobrano/slack-tabbed-tui/internal/slack/slacktest"
 )
@@ -48,6 +49,9 @@ func testApp(t *testing.T) (*app, *slacktest.Server, *bytes.Buffer) {
 		in:     strings.NewReader(""),
 		out:    out,
 		client: func(c creds.Credential) *slack.Client { return slack.New(s.URL, c.Token, c.Cookie) },
+		login: func(context.Context, string) (login.Session, error) {
+			return login.Session{}, login.ErrNoBrowser
+		},
 	}
 	return a, s, out
 }
@@ -66,7 +70,8 @@ func TestAuth(t *testing.T) {
 		t.Fatalf("auth before sign-in: %v %q", err, out)
 	}
 	signIn(t, a)
-	if !strings.Contains(out.String(), "Signed in to Acme (acme.slack.com) as me.") {
+	if !strings.Contains(out.String(), "sign in by hand instead") ||
+		!strings.Contains(out.String(), "Signed in to Acme (acme.slack.com) as me. The session is stored in "+a.store.Path) {
 		t.Errorf("sign-in output: %q", out)
 	}
 	c, err := a.store.Lookup("T0ACME")
@@ -215,5 +220,44 @@ func TestReply(t *testing.T) {
 	}
 	if err := a.run(context.Background(), []string{"reply", parentLink, "  "}); err == nil {
 		t.Error("blank reply posted")
+	}
+}
+
+func TestAuthBrowser(t *testing.T) {
+	a, _, out := testApp(t)
+	var opened string
+	a.login = func(_ context.Context, u string) (login.Session, error) {
+		opened = u
+		return login.Session{Cookie: slacktest.Cookie, Teams: []login.Team{
+			{ID: "T0BETA", URL: "https://beta.slack.com/", Token: "xoxc-beta"},
+			{ID: "T0ACME", URL: "https://acme.slack.com/", Token: slacktest.Token},
+		}}, nil
+	}
+	if err := a.run(context.Background(), []string{"auth", "acme"}); err != nil {
+		t.Fatal(err)
+	}
+	if opened != "https://acme.slack.com/" {
+		t.Errorf("opened %q", opened)
+	}
+	if c, err := a.store.Lookup("T0ACME"); err != nil || c.Token != slacktest.Token || c.Cookie != slacktest.Cookie {
+		t.Errorf("stored %+v %v", c, err)
+	}
+	if !strings.Contains(out.String(), "also signed in to beta.slack.com") {
+		t.Errorf("output %q", out)
+	}
+
+	// Signed in to other workspaces only.
+	if err := a.run(context.Background(), []string{"auth", "gamma"}); err == nil || !strings.Contains(err.Error(), "not to gamma.slack.com") {
+		t.Errorf("wrong workspace: %v", err)
+	}
+	// A failed browser login points to -manual.
+	a.login = func(context.Context, string) (login.Session, error) { return login.Session{}, context.DeadlineExceeded }
+	if err := a.run(context.Background(), []string{"auth", "acme"}); err == nil || !strings.Contains(err.Error(), "-manual") {
+		t.Errorf("failed login: %v", err)
+	}
+	// -manual skips the browser.
+	a.in = strings.NewReader(slacktest.Token + "\n" + slacktest.Cookie + "\n")
+	if err := a.run(context.Background(), []string{"auth", "-manual", "acme"}); err != nil {
+		t.Errorf("-manual: %v", err)
 	}
 }
