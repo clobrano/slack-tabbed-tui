@@ -461,16 +461,18 @@ stale.
 
 | # | Question | Decision |
 | --- | --- | --- |
-| Q2 | Which sign-in mode? | **Mode B (SSO/browser session)** is the primary path; mode A optional, P2 (2026‑10‑07) |
-| Q3 | Unread state can't sync with Slack in mode A; local-only? | Moot for v1: mode B syncs read state with Slack |
+| Q2 | Which sign-in mode? | **SSO/browser session only** (2026‑10‑07). A Slack app with its tokens (mode A) is out of scope |
+| Q1 | One shared distributed app, or each user creates their own? | Out of scope: there is no Slack app |
+| Q3 | Unread state can't sync with Slack; local-only? | Moot: the browser session syncs read state with Slack |
+| Q5 | Token paste vs. guided OAuth? | Out of scope: OAuth needs a Slack app. Sign-in is the browser login (§6 B) |
 
 ### Open
 
 | # | Question | Proposal |
 | --- | --- | --- |
-| Q1 | Mode A (P2): one shared distributed app, or each user creates their own private one from the manifest? | Own app: no 1 req/min limit, no hosted OAuth, no Marketplace review |
-| Q4 | Stay standard-library only (write a small RFC 6455 client) or use `slack-go/slack` + its `socketmode`? | Own small client, in line with ghwatch; `slack-go` as fallback if M0 shows edge cases |
-| Q5 | Mode A (P2): token paste vs. guided OAuth with a local redirect? | Paste in v1 (OAuth still needs the same app, it only saves copying) |
+| Q4 | WebSocket client for the web-client event stream: write a small RFC 6455 client (standard library only, like ghwatch) or use a module (`coder/websocket`, or `slack-go/slack` with a cookie-aware HTTP client)? | Own small client; a module as fallback if M0 shows edge cases |
+| Q11 | How to capture the session: drive a dedicated browser profile through the DevTools protocol (as slackdump does), read the cookie from the user's existing browser profile, or manual copy from dev tools only? | DevTools-driven login, manual copy as fallback; never read other browser profiles |
+| Q12 | When the session expires: only show `logged out`, or also send a desktop notification so watched threads don't go silent unnoticed? | Both |
 | Q6 | Inline images in the terminal: worth it? | P2, behind a setting, kitty + sixel |
 | Q7 | Which of "save for later / remind me / schedule" matter? | Schedule only (P2) |
 | Q8 | Separate binary, or a `thread` item kind inside ghwatch (its `kind.Kind` is the seam)? | Separate app sharing code: the composer and directory cache don't fit ghwatch's "checks" model |
