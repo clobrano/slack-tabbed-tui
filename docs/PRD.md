@@ -180,11 +180,14 @@ slack-tabbed-tui -serve                # run the daemon in the foreground
 
 ## 5. Feasibility
 
-**Verdict: feasible**, with a Slack app the user creates in their own
-workspace (an "internal, customer-built" app) and a **user token**. Almost
+**Verdict: feasible**, with either a private Slack app the user creates
+in their own workspace (an "internal, customer-built" app, never
+published) and its **user token**, or a plain **SSO/browser login**
+(§5.4). Almost
 all of the thread pane can be built on public, documented APIs. The real
 risks are not technical: getting the app approved by workspace admins
-(R1), and a few Slack features that have no public API (table below).
+(R1), and a few Slack features that have no public API (table below; the
+SSO/browser mode reaches some of them).
 
 ### 5.1 How it talks to Slack
 
@@ -254,10 +257,10 @@ events; the TUI works before the first sync ends (misses fall back to
 | Mention autocomplete ranking identical to Slack | 🟡 | Same signals we can see (participants, channel members); Slack's own ranking model is private |
 | Unfurls (link previews) | 🟡 | Shown when Slack has attached them to the message |
 | Message edited / deleted live | ✅ | `message_changed` / `message_deleted` subtypes |
-| Typing indicators ("X is typing") | ❌ | Only in the legacy RTM API, which new apps cannot use |
+| Typing indicators ("X is typing") | ❌ | Only in the legacy RTM API, which new apps cannot use. Possible in SSO mode (§5.4) |
 | Presence dots | 🟡 | `users.getPresence` on demand; no live presence for new apps |
-| **Read/unread state synced with Slack** | ❌ | No public API marks a thread read. Unread is tracked locally; reading here doesn't clear Slack's badge (**Q3**) |
-| Follow / unfollow thread in Slack | ❌ | No public API; we can only *show* whether you're subscribed when Slack tells us (`reply_users`, mentions) |
+| **Read/unread state synced with Slack** | ❌ | No public API marks a thread read. Unread is tracked locally; reading here doesn't clear Slack's badge (**Q3**). Possible in SSO mode (§5.4) |
+| Follow / unfollow thread in Slack | ❌ | No public API; we can only *show* whether you're subscribed when Slack tells us (`reply_users`, mentions). Possible in SSO mode (§5.4) |
 | Slash commands (`/remind`, `/giphy`, app commands) | ❌ | No public API to invoke them as a user |
 | Save for later / reminders on a message | ❌ / 🟡 | "Later" has no API; `reminders.add` exists but is limited (**Q7**) |
 | Schedule a reply | 🟡 | `chat.scheduleMessage` (P2) |
@@ -266,30 +269,47 @@ events; the TUI works before the first sync ends (misses fall back to
 | Shared (Slack Connect) channels | ✅ | Users from other orgs resolved with `users.info` |
 | DMs / group DM threads | ✅ | With `im:*` / `mpim:*` scopes |
 
-### 5.4 The alternative we rejected (for now): session tokens
+### 5.4 Two ways to sign in
 
-Clients such as wee-slack and slackdump can use the browser session token
-(`xoxc-` + `d` cookie). That needs no app and no admin, and unlocks
-undocumented endpoints (thread read state, typing, follow). But it
-breaks Slack's terms for most workspaces, breaks with SSO/device-trust
-policies, can stop working any day, and makes the user's full session
-credential sit on disk. Recommendation: **not supported in v1**; revisit
-only as an explicit, opt-in "unsupported" mode if R1 blocks most users
-(**Q2**).
+There are exactly two ways for a third-party program to act as you in
+Slack. **Neither publishes anything**: no Slack Marketplace, no app
+directory, no hosted server. See §6 for the steps of each.
+
+| | **A. Personal app token** | **B. SSO / browser session** |
+| --- | --- | --- |
+| What it is | An app that exists only inside your workspace, created by you, never distributed. You paste its tokens (`xoxp-` user token, `xapp-` app token) | You log in to Slack in a browser window (SSO, Google, email code, password: whatever your workspace uses); the tool keeps the session token (`xoxc-` + `d` cookie), the same one the Slack web client uses |
+| Needs a Slack app | Yes (private, one per user) | No |
+| Needs an admin | Only if the workspace requires approval for new apps (common in enterprises) | No |
+| Officially supported by Slack | Yes, documented API | No: undocumented, against the terms of many workspaces; used by wee-slack, slackdump and others |
+| Live updates | Socket Mode | Web-client WebSocket (`rtm.connect`), else polling |
+| Extra features | — | Thread read state and follow/unfollow (undocumented endpoints), typing indicators |
+| Can break | Rarely (documented API, deprecation notices) | Any time Slack changes its web client; session expiry or device-trust policies log you out |
+| Security | Scoped token, revocable from the app page | Full session credential on disk: anything you can do in the browser |
+
+There is no third way: "Sign in with Slack" / OAuth also needs an app
+(A), and legacy personal tokens can no longer be created.
+
+**Proposal:** support both from v1. `auth` tries A if the user has app
+tokens, else offers B. The rest of the program is the same: only the
+client layer (how to connect, which endpoints) differs. If neither works
+in the target workspace (apps blocked *and* session login blocked by
+policy), the project is a no-go there: M0 checks this first.
 
 ## 6. Authentication and setup
 
+### A. Personal app token (steps, done once per workspace)
+
 1. `slack-tabbed-tui manifest` prints an app manifest (YAML) with the
    scopes below, Socket Mode on and the user events subscribed.
-2. The user creates the app at api.slack.com/apps → "From manifest",
-   installs it to the workspace (admin approval may be needed), and
-   generates an app-level token with `connections:write`.
-3. `slack-tabbed-tui auth` asks for the user token (`xoxp-`) and the app
-   token (`xapp-`), checks them with `auth.test`, and stores them in the
-   OS keyring (Secret Service), or in a `0600` file when there is none.
-   `$SLACK_USER_TOKEN` / `$SLACK_APP_TOKEN` override, like ghwatch's
-   `$GITHUB_TOKEN`.
-4. One token pair per workspace; a link's host or team ID picks the pair.
+2. You open api.slack.com/apps → "Create New App" → "From manifest", pick
+   your workspace and paste it. Distribution stays off: the app is
+   visible only in your workspace and nobody can install it elsewhere.
+3. You click "Install to workspace" (or "Request to install" if an
+   admin must approve) and copy the User OAuth Token (`xoxp-`).
+4. Under "Basic Information" you generate an app-level token with
+   `connections:write` (`xapp-`).
+5. `slack-tabbed-tui auth` asks for the two tokens, checks them with
+   `auth.test`, and stores them (see "Storage").
 
 **User scopes** (minimum): `channels:history`, `groups:history`,
 `im:history`, `mpim:history`, `channels:read`, `groups:read`, `im:read`,
@@ -298,8 +318,26 @@ only as an explicit, opt-in "unsupported" mode if R1 blocks most users
 `files:write`, `team:read`, `pins:write` (P2). `users:read.email` is not
 needed.
 
-A guided OAuth flow (local browser redirect) instead of pasting tokens is
-nice to have (**Q5**).
+### B. SSO / browser session (no app)
+
+1. `slack-tabbed-tui auth --browser <workspace URL>` opens a browser
+   window (a dedicated profile, through the Chrome DevTools protocol, as
+   slackdump does).
+2. You log in as usual, SSO and 2FA included.
+3. The tool reads the `xoxc-` token and the `d` cookie from that session,
+   checks them with `auth.test`, stores them and closes the window.
+4. When Slack ends the session (policy-dependent, often days to weeks),
+   the TUI shows `logged out` and `auth --browser` again restores it.
+
+A manual fallback (copy token and cookie from the browser's dev tools) is
+documented for machines where the tool can't drive a browser.
+
+### Storage (both)
+
+Credentials go to the OS keyring (Secret Service), or a `0600` file when
+there is none. `$SLACK_TOKEN` (and `$SLACK_APP_TOKEN` / `$SLACK_COOKIE`)
+override, like ghwatch's `$GITHUB_TOKEN`. One credential per workspace;
+a link's host or team ID picks it.
 
 ## 7. Architecture
 
@@ -401,7 +439,8 @@ stale.
 
 | # | Risk | Impact | Mitigation |
 | --- | --- | --- | --- |
-| R1 | Workspace admins don't allow user-created apps or the scopes we need | Blocking for that user | Minimal scopes, clear manifest; document the admin request; **Q2** |
+| R1 | Workspace admins don't allow user-created apps or the scopes we need | Mode A blocked for that user | Mode B (SSO login); minimal scopes and a clear manifest for the admin request |
+| R1b | Mode B stops working (web client change, session policy, terms) | Users on mode B logged out | Keep the client layer swappable; clear `logged out` state; mode A stays the supported path |
 | R2 | Slack changes limits for internal apps too | Polling-heavy design breaks | Socket Mode first, polling only as fallback; cache everything |
 | R3 | User-scoped events in Socket Mode miss some message kinds (e.g. channels not joined, Slack Connect) | Delayed updates | Detect per thread and poll; show `polling` on the tab |
 | R4 | "Parity" expectations exceed the API (read state, slash commands, buttons) | Disappointment | Matrix in §5.3 agreed up front; `o` to jump to Slack for the rest |
@@ -413,11 +452,11 @@ stale.
 
 | # | Question | Proposal |
 | --- | --- | --- |
-| Q1 | One shared distributed app, or each user creates their own from the manifest? | Own app: no 1 req/min limit, no hosted OAuth, no Marketplace review |
-| Q2 | Support `xoxc` session tokens as an opt-in "unsupported" mode for workspaces where apps are blocked? | No in v1; reconsider after M0 |
+| Q1 | Mode A: one shared distributed app, or each user creates their own private one from the manifest? | Own app: no 1 req/min limit, no hosted OAuth, no Marketplace review |
+| Q2 | Ship both sign-in modes (§5.4), or only one? With B, use its extra features (read state sync, follow, typing)? | Both; B's extras behind a setting, off by default |
 | Q3 | Unread state can't sync with Slack. Is local-only unread acceptable? | Yes; `u` marks read locally |
 | Q4 | Stay standard-library only (write a small RFC 6455 client) or use `slack-go/slack` + its `socketmode`? | Own small client, in line with ghwatch; `slack-go` as fallback if M0 shows edge cases |
-| Q5 | Token paste vs. guided OAuth with a local redirect? | Paste in v1, OAuth in M4 |
+| Q5 | Mode A: token paste vs. guided OAuth with a local redirect? | Paste in v1 (OAuth still needs the same app, it only saves copying) |
 | Q6 | Inline images in the terminal: worth it? | P2, behind a setting, kitty + sixel |
 | Q7 | Which of "save for later / remind me / schedule" matter? | Schedule only (P2) |
 | Q8 | Separate binary, or a `thread` item kind inside ghwatch (its `kind.Kind` is the seam)? | Separate app sharing code: the composer and directory cache don't fit ghwatch's "checks" model |
