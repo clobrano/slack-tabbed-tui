@@ -244,7 +244,8 @@ func (a *app) authSignIn(ctx context.Context, workspace string, manual bool) err
 		return fmt.Errorf("%q is not a workspace URL, e.g. https://acme.slack.com", workspace)
 	}
 	token, cookie := os.Getenv(creds.EnvToken), os.Getenv(creds.EnvCookie)
-	userAgent := ""
+	userAgent, teamID := "", ""
+	var tries []attempt // sessions to check, best guess first
 	if (token == "" || cookie == "") && !manual {
 		s, err := a.login(ctx, "https://"+host+"/")
 		switch {
@@ -257,9 +258,11 @@ func (a *app) authSignIn(ctx context.Context, workspace string, manual bool) err
 			if err != nil {
 				return err
 			}
-			token, cookie, userAgent = team.Token, s.CookieHeader(host), s.UserAgent
+			token, cookie, userAgent, teamID = team.Token, s.CookieHeader(host), s.UserAgent, team.ID
+			tries = gridAttempts(s, team, host)
 			for _, other := range s.Teams {
-				if other.ID != team.ID {
+				org := other.ID == team.EnterpriseID || strings.HasPrefix(other.ID, "E")
+				if other.ID != team.ID && !org {
 					fmt.Fprintf(a.out, "The browser is also signed in to %s: run `slack-tabbed-tui auth %s` to use it too.\n", other.Host(), other.Host())
 				}
 			}
@@ -288,17 +291,41 @@ func (a *app) authSignIn(ctx context.Context, workspace string, manual bool) err
 	if !strings.HasPrefix(cookie, "xoxd-") && !strings.Contains(cookie, "d=xoxd-") {
 		return errors.New("the cookie must start with xoxd- (or be a Cookie header with d=xoxd-…)")
 	}
-	c := creds.Credential{URL: "https://" + host + "/", Token: token, Cookie: cookie, UserAgent: userAgent}
-	cl := a.client(c)
-	info, err := cl.AuthTest(ctx)
-	if err != nil {
-		return fmt.Errorf("checking the session with https://%s (cookies sent: %s): %w", host, cl.CookieNames(), err)
+	if len(tries) == 0 {
+		tries = []attempt{{what: "the session", base: "https://" + host + "/", token: token, cookie: cookie}}
 	}
-	if u, err := url.Parse(info.URL); err == nil && u.Host != "" {
-		c.URL = info.URL // Slack's canonical URL for the workspace
+	var (
+		c      creds.Credential
+		info   slack.AuthInfo
+		failed []string
+		ok     bool
+	)
+	for _, t := range tries {
+		c = creds.Credential{URL: t.base, Token: t.token, Cookie: t.cookie, UserAgent: userAgent}
+		cl := a.client(c)
+		var err error
+		if info, err = cl.AuthTest(ctx); err == nil && t.accepts(info, host) {
+			ok = true
+			break
+		}
+		if err == nil {
+			err = fmt.Errorf("accepted, but for %s (%s)", info.Team, info.URL)
+		}
+		failed = append(failed, fmt.Sprintf("  %s at %s (cookies: %s): %v", t.what, t.base, cl.CookieNames(), err))
 	}
-	c.Workspace = workspaceHost(c.URL)
+	if !ok {
+		return fmt.Errorf("Slack refused the session:\n%s", strings.Join(failed, "\n"))
+	}
+	if len(tries) > 1 {
+		fmt.Fprintf(a.out, "Slack accepted %s.\n", describe(tries, len(failed)))
+	}
+	// Threads are named by the host in their links: keep that one, and
+	// call the API where it answered.
+	c.Workspace = host
 	c.TeamID, c.Team, c.EnterpriseID = info.TeamID, info.Team, info.EnterpriseID
+	if teamID != "" && teamID != info.TeamID {
+		c.TeamID = teamID // the workspace's own ID, as in app.slack.com links
+	}
 	c.UserID, c.User = info.UserID, info.User
 	if err := a.store.Save(c); err != nil {
 		return err
@@ -309,6 +336,66 @@ func (a *app) authSignIn(ctx context.Context, workspace string, manual bool) err
 	}
 	fmt.Fprintf(a.out, "Signed in to %s (%s) as %s. The session is stored in %s.\n", c.Team, c.Workspace, c.User, where)
 	return nil
+}
+
+// attempt is one way to check a browser session: a token, the cookies
+// and the API host to send them to.
+type attempt struct {
+	what                string
+	base, token, cookie string
+	// team and enterprise are the IDs an answer must belong to (when
+	// known), so that another workspace's token is never kept.
+	team, enterprise string
+}
+
+// accepts reports whether auth.test's answer is for the workspace asked.
+func (t attempt) accepts(info slack.AuthInfo, host string) bool {
+	if t.team == "" {
+		return true
+	}
+	if u, err := url.Parse(info.URL); err == nil && strings.EqualFold(u.Hostname(), host) {
+		return true
+	}
+	return info.TeamID == t.team || t.enterprise != "" && (info.TeamID == t.enterprise || info.EnterpriseID == t.enterprise) ||
+		info.EnterpriseID != "" && info.TeamID == "" && strings.HasPrefix(t.team, "E")
+}
+
+func describe(tries []attempt, i int) string { return tries[i].what + " at " + tries[i].base }
+
+// gridAttempts lists the ways to use a browser session for host, most
+// likely first. On Enterprise Grid the web client keeps a token per
+// workspace and one for the organization, and the API answers on the
+// workspace and the organization hosts: which pair Slack accepts is not
+// documented, so every one is tried.
+func gridAttempts(s login.Session, team login.Team, host string) []attempt {
+	type tok struct{ what, token string }
+	toks := []tok{{"the token of " + host, team.Token}}
+	for _, t := range s.Teams {
+		if t.ID != team.ID {
+			toks = append(toks, tok{"the token of " + t.Host(), t.Token})
+		}
+	}
+	bases := []string{"https://" + host + "/"}
+	for _, t := range s.Teams {
+		if h := t.Host(); t.ID != team.ID && (t.ID == team.EnterpriseID || strings.HasSuffix(h, ".enterprise.slack.com")) {
+			bases = append(bases, "https://"+h+"/")
+		}
+	}
+	bases = append(bases, "https://slack.com/")
+	var out []attempt
+	seen := map[string]bool{}
+	for _, b := range bases {
+		u, _ := url.Parse(b)
+		for _, t := range toks {
+			key := b + t.token
+			if t.token == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, attempt{what: t.what, base: b, token: t.token, cookie: s.CookieHeader(u.Hostname()), team: team.ID, enterprise: team.EnterpriseID})
+		}
+	}
+	return out
 }
 
 func prompt(w io.Writer, r *bufio.Reader, label string) (string, error) {

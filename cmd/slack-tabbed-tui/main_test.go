@@ -303,3 +303,50 @@ func TestStatus(t *testing.T) {
 		t.Errorf("ls with snapshot = %q %v", out, err)
 	}
 }
+
+func TestAuthEnterpriseGrid(t *testing.T) {
+	a, fake, out := testApp(t)
+	fake.Auth = slack.AuthInfo{URL: "https://redhat.enterprise.slack.com/", Team: "Red Hat", TeamID: "E0ORG", EnterpriseID: "E0ORG", UserID: "U0ME", User: "me"}
+	var bases []string
+	a.client = func(c creds.Credential) *slack.Client {
+		bases = append(bases, c.URL)
+		cl := newClient(c)
+		cl.BaseURL = fake.URL + "/api/"
+		return cl
+	}
+	// Only the organization's token works (the fake accepts one token).
+	a.login = func(context.Context, string) (login.Session, error) {
+		return login.Session{Cookie: slacktest.Cookie, Teams: []login.Team{
+			{ID: "T0EXT", URL: "https://redhat-external.slack.com/", Token: "xoxc-external"},
+			{ID: "T0INT", URL: "https://redhat-internal.slack.com/", Token: "xoxc-stale", EnterpriseID: "E0ORG"},
+			{ID: "E0ORG", URL: "https://redhat.enterprise.slack.com/", Token: slacktest.Token},
+		}}, nil
+	}
+	if err := a.run(context.Background(), []string{"auth", "redhat-internal.slack.com"}); err != nil {
+		t.Fatalf("auth: %v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "Slack accepted the token of redhat.enterprise.slack.com at https://redhat-internal.slack.com/") {
+		t.Errorf("output %q", out)
+	}
+	if strings.Contains(out.String(), "auth redhat.enterprise.slack.com") {
+		t.Errorf("suggested signing in to the organization: %q", out)
+	}
+	c, err := a.store.Lookup("redhat-internal.slack.com")
+	if err != nil || c.Workspace != "redhat-internal.slack.com" || c.TeamID != "T0INT" || c.EnterpriseID != "E0ORG" || c.Token != slacktest.Token {
+		t.Errorf("stored %+v %v", c, err)
+	}
+	if bases[0] != "https://redhat-internal.slack.com/" {
+		t.Errorf("first try at %s", bases[0])
+	}
+
+	// A token Slack accepts for another workspace is not kept.
+	fake.Auth = slack.AuthInfo{URL: "https://redhat-external.slack.com/", Team: "External", TeamID: "T0EXT"}
+	_, _ = a.store.Remove("redhat-internal.slack.com")
+	err = a.run(context.Background(), []string{"auth", "redhat-internal.slack.com"})
+	if err == nil || !strings.Contains(err.Error(), "accepted, but for External") || !strings.Contains(err.Error(), "invalid_auth") {
+		t.Errorf("wrong workspace: %v", err)
+	}
+	if all, _ := a.store.All(); len(all) != 0 {
+		t.Errorf("stored %+v", all)
+	}
+}
