@@ -58,7 +58,12 @@ func (f *fakeBrowser) serve(w http.ResponseWriter, r *http.Request) {
 			f.polls++
 			cookies := []map[string]string{{"name": "b", "value": "x", "domain": ".slack.com"}}
 			if signedIn {
-				cookies = append(cookies, map[string]string{"name": "d", "value": "xoxd-abc%2F", "domain": ".slack.com"})
+				cookies = append(cookies,
+					map[string]string{"name": "d", "value": "xoxd-abc%2F", "domain": ".slack.com"},
+					map[string]string{"name": "d-s", "value": "1700000000", "domain": ".slack.com"},
+					map[string]string{"name": "lc", "value": "x", "domain": "app.slack.com"},
+					map[string]string{"name": "ws", "value": "y", "domain": ".acme.slack.com"},
+					map[string]string{"name": "other", "value": "z", "domain": ".example.com"})
 			}
 			result = map[string]any{"cookies": cookies}
 		case "Target.getTargets":
@@ -79,6 +84,8 @@ func (f *fakeBrowser) serve(w http.ResponseWriter, r *http.Request) {
 				value = localConfig
 			}
 			result = map[string]any{"result": map[string]any{"type": "string", "value": value}}
+		case "Browser.getVersion":
+			result = map[string]any{"userAgent": "Mozilla/5.0 Test"}
 		case "Browser.close":
 			f.closed = true
 		}
@@ -107,8 +114,15 @@ func TestLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Cookie != "xoxd-abc%2F" || len(s.Teams) != 2 {
+	if s.Cookie != "xoxd-abc%2F" || len(s.Teams) != 2 || s.UserAgent != "Mozilla/5.0 Test" {
 		t.Fatalf("session %+v", s)
+	}
+	// What the browser would send to each host.
+	if got := s.CookieHeader("acme.slack.com"); got != "b=x; d=xoxd-abc%2F; d-s=1700000000; ws=y" {
+		t.Errorf("CookieHeader(acme) = %q", got)
+	}
+	if got := s.CookieHeader("beta.slack.com"); got != "b=x; d=xoxd-abc%2F; d-s=1700000000" {
+		t.Errorf("CookieHeader(beta) = %q", got)
 	}
 	team, err := s.Pick("acme.slack.com")
 	if err != nil || team.Token != "xoxc-acme" || team.ID != "T1" {

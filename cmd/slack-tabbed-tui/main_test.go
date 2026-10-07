@@ -47,12 +47,16 @@ func testApp(t *testing.T) (*app, *slacktest.Server, *bytes.Buffer) {
 	paths := config.Paths{ConfigDir: dir + "/config", StateDir: dir + "/state", CacheDir: dir + "/cache", RuntimeDir: dir + "/run"}
 	out := &bytes.Buffer{}
 	a := &app{
-		paths:  paths,
-		cfg:    config.Default(),
-		store:  creds.Store{Path: paths.Credentials()},
-		in:     strings.NewReader(""),
-		out:    out,
-		client: func(c creds.Credential) *slack.Client { return slack.New(s.URL, c.Token, c.Cookie) },
+		paths: paths,
+		cfg:   config.Default(),
+		store: creds.Store{Path: paths.Credentials()},
+		in:    strings.NewReader(""),
+		out:   out,
+		client: func(c creds.Credential) *slack.Client {
+			cl := newClient(c)
+			cl.BaseURL = s.URL + "/api/"
+			return cl
+		},
 		login: func(context.Context, string) (login.Session, error) {
 			return login.Session{}, login.ErrNoBrowser
 		},
@@ -243,7 +247,7 @@ func TestAuthBrowser(t *testing.T) {
 	if opened != "https://acme.slack.com/" {
 		t.Errorf("opened %q", opened)
 	}
-	if c, err := a.store.Lookup("T0ACME"); err != nil || c.Token != slacktest.Token || c.Cookie != slacktest.Cookie {
+	if c, err := a.store.Lookup("T0ACME"); err != nil || c.Token != slacktest.Token || c.Cookie != "d="+slacktest.Cookie {
 		t.Errorf("stored %+v %v", c, err)
 	}
 	if !strings.Contains(out.String(), "also signed in to beta.slack.com") {

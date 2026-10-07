@@ -111,7 +111,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.Notifier = notify.Nop{}
 	}
 	if d.Client == nil {
-		d.Client = func(c creds.Credential) *slack.Client { return slack.New(c.URL, c.Token, c.Cookie) }
+		d.Client = func(c creds.Credential) *slack.Client {
+			cl := slack.New(c.URL, c.Token, c.Cookie)
+			cl.UserAgent = c.UserAgent
+			return cl
+		}
 	}
 	if d.WatchEvery == 0 {
 		d.WatchEvery = 2 * time.Second

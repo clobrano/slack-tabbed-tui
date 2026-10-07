@@ -20,7 +20,39 @@ type Client struct {
 	// Enterprise Grid sessions reach the right workspace.
 	BaseURL string
 	Token   string // xoxc-…
-	Cookie  string // value of the d cookie (xoxd-…), as stored by the browser
+	// Cookie is the value of the d cookie (xoxd-…) as the browser stores
+	// it, or a whole Cookie header ("d=…; d-s=…").
+	Cookie string
+	// UserAgent, when set, is sent instead of the app's own, so calls
+	// look like the browser the session comes from.
+	UserAgent string
+}
+
+// CookieHeader is the Cookie header sent with every call.
+func (c *Client) CookieHeader() string {
+	if c.Cookie == "" || strings.Contains(c.Cookie, "=") {
+		return c.Cookie
+	}
+	return "d=" + c.Cookie
+}
+
+// CookieNames lists the names of the cookies sent, for error messages
+// (never the values).
+func (c *Client) CookieNames() string {
+	var names []string
+	for _, p := range strings.Split(c.CookieHeader(), ";") {
+		if n, _, ok := strings.Cut(strings.TrimSpace(p), "="); ok {
+			names = append(names, n)
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+func (c *Client) userAgent() string {
+	if c.UserAgent != "" {
+		return c.UserAgent
+	}
+	return "slack-tabbed-tui"
 }
 
 // New returns a client for the workspace at workspaceURL
@@ -79,9 +111,9 @@ func (c *Client) Call(ctx context.Context, method string, params url.Values, out
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", "slack-tabbed-tui")
-	if c.Cookie != "" {
-		req.Header.Set("Cookie", "d="+c.Cookie)
+	req.Header.Set("User-Agent", c.userAgent())
+	if h := c.CookieHeader(); h != "" {
+		req.Header.Set("Cookie", h)
 	}
 	res, err := c.HTTP.Do(req)
 	if err != nil {

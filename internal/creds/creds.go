@@ -23,7 +23,8 @@ type Credential struct {
 	UserID       string `json:"user_id"`
 	User         string `json:"user"`
 	Token        string `json:"token,omitempty"`  // xoxc-…
-	Cookie       string `json:"cookie,omitempty"` // the d cookie, xoxd-…
+	Cookie       string `json:"cookie,omitempty"` // the d cookie (xoxd-…), or a whole Cookie header
+	UserAgent    string `json:"user_agent,omitempty"`
 	// Keyring is true when Token and Cookie are kept in the keyring
 	// rather than in the file.
 	Keyring bool `json:"keyring,omitempty"`

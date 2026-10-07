@@ -18,7 +18,15 @@ ghwatch's `docs/decisions.md`.
   is stored, so every link form of a thread gives the same ID.
 - **API host**: calls go to the workspace's own host
   (`https://acme.slack.com/api/…`), as the web client does, with the
-  token in the form body and the `d` cookie in the header.
+  token in the form body.
+- **Cookies and User-Agent**: the browser sign-in keeps every cookie
+  the browser would send to the workspace host, not only `d`, and the
+  browser's User-Agent; API calls and the event socket send both.
+  Enterprise Grid sessions were rejected (`invalid_auth`) with `d`
+  alone: they also need `d-s`. The stored cookie is a whole Cookie
+  header; a bare `xoxd-…` value still works (manual sign-in,
+  `$SLACK_COOKIE`). A failed check lists the cookie names sent, never
+  their values.
 - **Session storage**: the token and cookie go to the desktop keyring
   through libsecret's `secret-tool` (no D-Bus code in the binary, as
   ghwatch uses `notify-send`). The credentials file keeps the rest

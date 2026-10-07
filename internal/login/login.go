@@ -41,10 +41,36 @@ func (t Team) Host() string {
 	return strings.ToLower(u.Hostname())
 }
 
+// Cookie is a browser cookie of a slack.com domain.
+type Cookie struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Domain string `json:"domain"`
+}
+
 // Session is what a successful login yields.
 type Session struct {
-	Cookie string // the d cookie, xoxd-…
-	Teams  []Team // every workspace of the browser session
+	Cookie    string   // the d cookie, xoxd-…
+	Cookies   []Cookie // every slack.com cookie, d included
+	Teams     []Team   // every workspace of the browser session
+	UserAgent string   // the browser's, sent with API calls like the web client
+}
+
+// CookieHeader is the Cookie header the browser sends to host: every
+// cookie whose domain matches it. Enterprise Grid sessions need more
+// than d (d-s, at least).
+func (s Session) CookieHeader(host string) string {
+	var parts []string
+	for _, c := range s.Cookies {
+		d := strings.ToLower(c.Domain)
+		if d == host || strings.HasPrefix(d, ".") && (host == d[1:] || strings.HasSuffix(host, d)) {
+			parts = append(parts, c.Name+"="+c.Value)
+		}
+	}
+	if len(parts) == 0 && s.Cookie != "" {
+		return "d=" + s.Cookie
+	}
+	return strings.Join(parts, "; ")
 }
 
 // Browser is a started browser with the DevTools protocol on.
@@ -100,6 +126,12 @@ func Login(ctx context.Context, workspaceURL string, opt Options) (Session, erro
 			return Session{}, err
 		}
 		if s.Cookie != "" && len(s.Teams) > 0 {
+			var v struct {
+				UserAgent string `json:"userAgent"`
+			}
+			if cdp.callInto(ctx, "Browser.getVersion", nil, "", &v) == nil {
+				s.UserAgent = v.UserAgent
+			}
 			_, _ = cdp.call(ctx, "Browser.close", nil, "")
 			return s, nil
 		}
@@ -115,17 +147,18 @@ func Login(ctx context.Context, workspaceURL string, opt Options) (Session, erro
 func (d *devtools) session(ctx context.Context, attached map[string]string) (Session, error) {
 	var s Session
 	var cookies struct {
-		Cookies []struct {
-			Name   string `json:"name"`
-			Value  string `json:"value"`
-			Domain string `json:"domain"`
-		} `json:"cookies"`
+		Cookies []Cookie `json:"cookies"`
 	}
 	if err := d.callInto(ctx, "Storage.getCookies", nil, "", &cookies); err != nil {
 		return s, err
 	}
 	for _, c := range cookies.Cookies {
-		if c.Name == "d" && strings.HasSuffix(strings.TrimPrefix(c.Domain, "."), "slack.com") && strings.HasPrefix(c.Value, "xoxd-") {
+		d := strings.TrimPrefix(c.Domain, ".")
+		if d != "slack.com" && !strings.HasSuffix(d, ".slack.com") {
+			continue
+		}
+		s.Cookies = append(s.Cookies, c)
+		if c.Name == "d" && strings.HasPrefix(c.Value, "xoxd-") {
 			s.Cookie = c.Value
 		}
 	}

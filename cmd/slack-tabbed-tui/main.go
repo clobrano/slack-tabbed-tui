@@ -75,6 +75,12 @@ type app struct {
 	login func(ctx context.Context, workspaceURL string) (login.Session, error)
 }
 
+func newClient(c creds.Credential) *slack.Client {
+	cl := slack.New(c.URL, c.Token, c.Cookie)
+	cl.UserAgent = c.UserAgent
+	return cl
+}
+
 func main() {
 	log.SetFlags(0)
 	log.SetPrefix("slack-tabbed-tui: ")
@@ -96,7 +102,7 @@ func main() {
 		store:  creds.Store{Path: paths.Credentials(), Secrets: creds.NewSecretTool()},
 		in:     os.Stdin,
 		out:    os.Stdout,
-		client: func(c creds.Credential) *slack.Client { return slack.New(c.URL, c.Token, c.Cookie) },
+		client: newClient,
 		login: func(ctx context.Context, workspaceURL string) (login.Session, error) {
 			bin, err := login.FindBrowser()
 			if err != nil {
@@ -238,6 +244,7 @@ func (a *app) authSignIn(ctx context.Context, workspace string, manual bool) err
 		return fmt.Errorf("%q is not a workspace URL, e.g. https://acme.slack.com", workspace)
 	}
 	token, cookie := os.Getenv(creds.EnvToken), os.Getenv(creds.EnvCookie)
+	userAgent := ""
 	if (token == "" || cookie == "") && !manual {
 		s, err := a.login(ctx, "https://"+host+"/")
 		switch {
@@ -250,7 +257,7 @@ func (a *app) authSignIn(ctx context.Context, workspace string, manual bool) err
 			if err != nil {
 				return err
 			}
-			token, cookie = team.Token, s.Cookie
+			token, cookie, userAgent = team.Token, s.CookieHeader(host), s.UserAgent
 			for _, other := range s.Teams {
 				if other.ID != team.ID {
 					fmt.Fprintf(a.out, "The browser is also signed in to %s: run `slack-tabbed-tui auth %s` to use it too.\n", other.Host(), other.Host())
@@ -263,7 +270,8 @@ func (a *app) authSignIn(ctx context.Context, workspace string, manual bool) err
   token:  in the Console, run  JSON.parse(localStorage.localConfig_v2).teams
           and copy the "token" (xoxc-…) of the team whose "url" is https://%s/
   cookie: in Application (Chrome) or Storage (Firefox) > Cookies, copy the
-          value of the cookie named "d" (xoxd-…)
+          value of the cookie named "d" (xoxd-…). On Enterprise Grid, paste
+          both cookies instead:  d=xoxd-…; d-s=…
 `, host, host)
 		r := bufio.NewReader(a.in)
 		var err error
@@ -277,13 +285,14 @@ func (a *app) authSignIn(ctx context.Context, workspace string, manual bool) err
 	if !strings.HasPrefix(token, "xoxc-") {
 		return errors.New("the token must start with xoxc-")
 	}
-	if !strings.HasPrefix(cookie, "xoxd-") {
-		return errors.New("the cookie must start with xoxd-")
+	if !strings.HasPrefix(cookie, "xoxd-") && !strings.Contains(cookie, "d=xoxd-") {
+		return errors.New("the cookie must start with xoxd- (or be a Cookie header with d=xoxd-…)")
 	}
-	c := creds.Credential{URL: "https://" + host + "/", Token: token, Cookie: cookie}
-	info, err := a.client(c).AuthTest(ctx)
+	c := creds.Credential{URL: "https://" + host + "/", Token: token, Cookie: cookie, UserAgent: userAgent}
+	cl := a.client(c)
+	info, err := cl.AuthTest(ctx)
 	if err != nil {
-		return fmt.Errorf("checking the session: %w", err)
+		return fmt.Errorf("checking the session with https://%s (cookies sent: %s): %w", host, cl.CookieNames(), err)
 	}
 	if u, err := url.Parse(info.URL); err == nil && u.Host != "" {
 		c.URL = info.URL // Slack's canonical URL for the workspace

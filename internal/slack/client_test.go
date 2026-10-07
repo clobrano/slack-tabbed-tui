@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -160,5 +162,32 @@ func TestMembersChannelsEmoji(t *testing.T) {
 	}
 	if e, err := c.CustomEmoji(ctx); err != nil || len(e) != 1 || e[0] != "partyparrot" {
 		t.Errorf("emoji: %v %v", e, err)
+	}
+}
+
+func TestCookieHeaderAndUserAgent(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+	c := slack.New(srv.URL, "xoxc-1", "xoxd-a%2F")
+	if _, err := c.AuthTest(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("Cookie") != "d=xoxd-a%2F" || got.Get("User-Agent") != "slack-tabbed-tui" {
+		t.Errorf("bare d cookie: %v", got)
+	}
+	c = slack.New(srv.URL, "xoxc-1", "d=xoxd-a%2F; d-s=123")
+	c.UserAgent = "Mozilla/5.0 Test"
+	if _, err := c.AuthTest(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("Cookie") != "d=xoxd-a%2F; d-s=123" || got.Get("User-Agent") != "Mozilla/5.0 Test" {
+		t.Errorf("cookie header: %v", got)
+	}
+	if c.CookieNames() != "d, d-s" {
+		t.Errorf("CookieNames = %q", c.CookieNames())
 	}
 }

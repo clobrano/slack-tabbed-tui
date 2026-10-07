@@ -150,9 +150,9 @@ func (s *Stream) once(ctx context.Context, fn func(Event)) error {
 	if err != nil {
 		return err
 	}
-	h := http.Header{}
-	if s.Client.Cookie != "" {
-		h.Set("Cookie", "d="+s.Client.Cookie)
+	h := http.Header{"User-Agent": {s.Client.userAgent()}}
+	if c := s.Client.CookieHeader(); c != "" {
+		h.Set("Cookie", c)
 	}
 	dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	conn, err := ws.Dial(dctx, info.URL, h)
