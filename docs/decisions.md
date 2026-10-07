@@ -87,5 +87,20 @@ ghwatch's `docs/decisions.md`.
 - **`enter` opens the selected message in Slack** (as it opens the job
   in ghwatch). The PRD had it expand long messages; messages are always
   shown whole instead.
-- **Composer**: plain text is escaped for Slack on send. `@` / `#` / `:`
-  completion, which will insert real mentions, is the next step.
+- **Composer**: plain text is escaped for Slack on send; mentions,
+  groups and channels picked from the completion list are kept as
+  label → token pairs per draft and swapped in on send (longest label
+  first). A mention typed by hand without picking stays plain text, as
+  in Slack.
+- **Completion** is asked of the daemon (`complete` over the socket,
+  one request per keystroke while the word starts with `@`, `#` or
+  `:`): the directory can be large (tens of thousands of users on
+  Enterprise Grid) and lives in the daemon. Ranking (thread
+  participants, channel members, groups, @here/@channel, others; name
+  start before word start) is in `internal/complete`, a pure package.
+  Channel members are fetched once per channel (up to 1000).
+- **Emoji**: names come from iamcal/emoji-data (the set Slack uses),
+  turned into a Go table by `internal/emoji/gen`. Standard `:name:` is
+  shown as the emoji in messages and reactions; custom emoji stay
+  `:name:`. Emoji that need a variation selector (🛳️) may take one cell
+  more or less depending on the terminal.

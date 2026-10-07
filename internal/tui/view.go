@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/clobrano/slack-tabbed-tui/internal/emoji"
 	"github.com/clobrano/slack-tabbed-tui/internal/model"
 )
 
@@ -44,7 +45,7 @@ func (m *Model) lines(w, h int) []line {
 	out = append(out, m.header(w)...)
 	var composer []line
 	if m.mode == modeCompose {
-		composer = m.composer(w)
+		composer = append(m.popup(w), m.composer(w)...)
 	}
 	// The message list sits in a box: border, rows, border.
 	rows := h - len(out) - 2 - len(composer) - 1
@@ -369,7 +370,11 @@ func (m *Model) msgLines(t *model.Thread, msg model.Message, w int, selected boo
 			if r.Mine {
 				style = sAccent + sBold
 			}
-			l = append(l, seg{" ", ""}, seg{fmt.Sprintf(":%s: %d", r.Name, r.Count), style})
+			name := ":" + r.Name + ":"
+			if c, ok := emoji.Lookup(r.Name); ok {
+				name = c
+			}
+			l = append(l, seg{" ", ""}, seg{fmt.Sprintf("%s %d", name, r.Count), style})
 		}
 		out = append(out, l)
 	}
@@ -526,6 +531,47 @@ func (m *Model) composer(w int) []line {
 	return b
 }
 
+// popup lists the completions of the word being typed.
+func (m *Model) popup(w int) []line {
+	if !m.popupOpen() {
+		return nil
+	}
+	labelW := 0
+	for _, c := range m.comp.items {
+		labelW = max(labelW, strWidth(c.Label))
+	}
+	labelW = min(labelW, w/2)
+	var out []line
+	for i, c := range m.comp.items {
+		mark := "  "
+		if i == m.comp.sel && !m.Color {
+			mark = "› "
+		}
+		l := line{{mark, ""}}
+		if c.Emoji != "" {
+			l = append(l, seg{c.Emoji + " ", ""})
+		}
+		l = append(l, seg{padRight(c.Label, labelW), sBold + sWhite})
+		switch c.Kind {
+		case "bot":
+			l = append(l, seg{" APP", sDim + sBold})
+		case "group":
+			l = append(l, seg{" group", sDim})
+		}
+		if c.Detail != "" {
+			l = append(l, seg{"  " + c.Detail, sSecondary})
+		}
+		l = fill(l, w, "")
+		if i == m.comp.sel && m.Color {
+			l = withStyle(l, bgSelect)
+		} else if m.Color {
+			l = withStyle(l, bgOverlay)
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
 // overlay draws a panel centered on an empty screen, as in ghwatch.
 func overlay(w, h int, title string, content []line) []line {
 	body := []line{{{" " + title + " ", bgAccent + sBold + sWhite}}, {}}
@@ -605,6 +651,7 @@ var helpSections = []struct {
 		{"enter", "send (in the reply box)"},
 		{"alt+enter, ctrl+j", "new line"},
 		{"ctrl+b", "also send to the channel"},
+		{"@ # :", "complete people, channels, emoji"},
 		{"esc / ctrl+c", "keep the draft / discard it"},
 	}},
 	{"Links", [][2]string{
@@ -704,6 +751,8 @@ func (m *Model) footer(w int) line {
 		left = line{{"  /", sBold + sAccent}, {string(m.input) + "_", sWhite}, {"   ↑/↓ choose · enter select · esc cancel", sDim}}
 	case m.mode == modeConfirm:
 		left = line{{"  " + m.confirmMsg + " ", sBold + sWhite}, {"[y/N]", sYellow}}
+	case m.mode == modeCompose && m.popupOpen():
+		left = hintLine(pickKeys, w-right.width()-1)
 	case m.mode == modeCompose:
 		left = composeHints(w - right.width() - 1)
 	case m.flash != "" && m.now().Before(m.flashUntil):
@@ -743,6 +792,12 @@ var composeKeys = []hint{
 	{"ctrl+b", "also to channel", 3},
 	{"esc", "keep draft", 1},
 	{"ctrl+c", "discard", 4},
+}
+
+var pickKeys = []hint{
+	{"tab/enter", "pick", 0},
+	{"↑/↓", "choose", 1},
+	{"esc", "close", 2},
 }
 
 func composeHints(w int) line { return hintLine(composeKeys, w) }

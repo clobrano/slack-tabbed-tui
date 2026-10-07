@@ -137,3 +137,28 @@ func TestTSTime(t *testing.T) {
 		t.Error("TSTime(garbage) is not zero")
 	}
 }
+
+func TestMembersChannelsEmoji(t *testing.T) {
+	s := slacktest.New()
+	defer s.Close()
+	s.PageSize = 2
+	s.Members["C1"] = []string{"U1", "U2", "U3", "U4", "U5"}
+	s.Convs["C1"] = slack.Conversation{ID: "C1", Name: "general", IsMember: true}
+	s.Convs["C2"] = slack.Conversation{ID: "C2", Name: "random"}
+	s.Convs["C3"] = slack.Conversation{ID: "C3", Name: "private", IsPrivate: true, IsMember: true}
+	s.Emoji["partyparrot"] = "https://emoji/pp.gif"
+	c := s.Client()
+	ctx := context.Background()
+	if m, err := c.ChannelMembers(ctx, "C1", 0); err != nil || len(m) != 5 {
+		t.Errorf("all members: %v %v", m, err)
+	}
+	if m, err := c.ChannelMembers(ctx, "C1", 2); err != nil || len(m) != 4 {
+		t.Errorf("two pages: %v %v", m, err)
+	}
+	if ch, err := c.MyChannels(ctx); err != nil || len(ch) != 2 || ch[0].Name != "general" || ch[1].Name != "private" {
+		t.Errorf("my channels: %+v %v", ch, err)
+	}
+	if e, err := c.CustomEmoji(ctx); err != nil || len(e) != 1 || e[0] != "partyparrot" {
+		t.Errorf("emoji: %v %v", e, err)
+	}
+}

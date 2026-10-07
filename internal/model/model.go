@@ -224,3 +224,12 @@ type Event struct {
 	Author   string    `json:"author,omitempty"`
 	URL      string    `json:"url,omitempty"`
 }
+
+// Candidate is one completion for @, # or : in the reply box.
+type Candidate struct {
+	Kind   string `json:"kind"`             // user, bot, group, special, channel, emoji
+	Label  string `json:"label"`            // inserted in the draft: "@Alice", "#general", ":eyes:"
+	Token  string `json:"token"`            // sent to Slack in its place: "<@U1>", "<#C1>", ":eyes:"
+	Detail string `json:"detail,omitempty"` // shown next to it: real name, handle, group name…
+	Emoji  string `json:"emoji,omitempty"`  // the emoji itself, for standard emoji
+}

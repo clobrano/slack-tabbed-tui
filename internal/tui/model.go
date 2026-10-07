@@ -23,6 +23,17 @@ type Backend interface {
 	Open(url string) error
 	// Copy puts text on the clipboard.
 	Copy(text string) error
+	// Complete asks the daemon what an @, # or : word completes to; the
+	// answer comes back through Model.SetCompletions.
+	Complete(cmd ipc.Command)
+}
+
+// completion is the state of the completion popup in the reply box.
+type completion struct {
+	kind, query string // the word being completed: "@" + "ali"
+	items       []model.Candidate
+	sel         int
+	dismissed   bool // esc: stay closed until the word changes
 }
 
 type mode int
@@ -68,8 +79,10 @@ type Model struct {
 	confirmCmd ipc.Command
 	pendingG   bool
 
-	drafts    map[string][]rune // composer text per thread
-	broadcast map[string]bool   // "also send to channel" per thread
+	drafts    map[string][]rune            // composer text per thread
+	broadcast map[string]bool              // "also send to channel" per thread
+	mentions  map[string][]model.Candidate // completions picked, per thread
+	comp      completion
 
 	flash      string
 	flashErr   bool
@@ -83,7 +96,7 @@ func NewModel(b Backend) *Model {
 	return &Model{
 		backend: b, now: time.Now, Color: true,
 		sel: map[string]string{}, top: map[string]int{}, readSent: map[string]string{},
-		drafts: map[string][]rune{}, broadcast: map[string]bool{},
+		drafts: map[string][]rune{}, broadcast: map[string]bool{}, mentions: map[string][]model.Candidate{},
 		pageRows: 10, listWidth: 78,
 	}
 }
@@ -317,7 +330,7 @@ func (m *Model) keyNormal(k string) {
 		}
 	case "i":
 		if t := m.current(); t != nil {
-			m.mode, m.input = modeCompose, m.drafts[t.ID]
+			m.mode, m.input, m.comp = modeCompose, m.drafts[t.ID], completion{}
 		}
 	case "u":
 		if t := m.current(); t != nil {
@@ -397,6 +410,83 @@ func (m *Model) open(url string) {
 	m.setFlash("opening "+url, false)
 }
 
+// SetCompletions shows the daemon's answer to a completion request, if
+// it is still about the word being typed.
+func (m *Model) SetCompletions(cmd ipc.Command, items []model.Candidate, err error) {
+	if m.mode != modeCompose || cmd.Kind != m.comp.kind || cmd.Text != m.comp.query {
+		return
+	}
+	if err != nil {
+		m.setFlash(err.Error(), true)
+		return
+	}
+	m.comp.items, m.comp.sel = items, 0
+}
+
+// popupOpen reports whether the completion popup has something to pick.
+func (m *Model) popupOpen() bool {
+	return m.mode == modeCompose && !m.comp.dismissed && len(m.comp.items) > 0
+}
+
+// currentWord is the word at the end of the draft (the cursor is always
+// at the end).
+func (m *Model) currentWord() string {
+	s := string(m.input)
+	if i := strings.LastIndexAny(s, " \n\t"); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
+}
+
+// updateCompletion asks for completions when the word being typed
+// starts with @, # or : (and two letters for emoji).
+func (m *Model) updateCompletion() {
+	t := m.current()
+	w := m.currentWord()
+	kind, query := "", ""
+	if w != "" {
+		switch w[0] {
+		case '@', '#':
+			kind, query = w[:1], w[1:]
+		case ':':
+			if len(w) >= 3 && !strings.Contains(w[1:], ":") {
+				kind, query = w[:1], w[1:]
+			}
+		}
+	}
+	if kind == m.comp.kind && query == m.comp.query {
+		return
+	}
+	m.comp = completion{kind: kind, query: query}
+	if kind != "" && t != nil && m.connected {
+		m.backend.Complete(ipc.Command{Op: ipc.OpComplete, ID: t.ID, Kind: kind, Text: query})
+	}
+}
+
+// accept replaces the word being typed with the selected completion.
+func (m *Model) accept(t *model.Thread) {
+	c := m.comp.items[min(m.comp.sel, len(m.comp.items)-1)]
+	w := m.currentWord()
+	m.input = append(m.input[:len(m.input)-len([]rune(w))], []rune(c.Label+" ")...)
+	if c.Token != c.Label {
+		m.mentions[t.ID] = append(m.mentions[t.ID], c)
+	}
+	m.comp = completion{}
+}
+
+// outgoing turns the draft into Slack markup: text escaped, picked
+// mentions and channels replaced by their tokens.
+func (m *Model) outgoing(t *model.Thread, text string) string {
+	out := slack.Escape(text)
+	picked := append([]model.Candidate(nil), m.mentions[t.ID]...)
+	// Longest labels first, so "@Al" does not cut "@Alice".
+	sort.SliceStable(picked, func(i, j int) bool { return len(picked[i].Label) > len(picked[j].Label) })
+	for _, c := range picked {
+		out = strings.ReplaceAll(out, slack.Escape(c.Label), c.Token)
+	}
+	return out
+}
+
 // keyCompose edits the reply being written.
 func (m *Model) keyCompose(k string) {
 	t := m.current()
@@ -404,12 +494,30 @@ func (m *Model) keyCompose(k string) {
 		m.mode = modeNormal
 		return
 	}
+	if m.popupOpen() {
+		switch k {
+		case kTab, kEnter:
+			m.accept(t)
+			return
+		case kDown, kCtrlN:
+			m.comp.sel = (m.comp.sel + 1) % len(m.comp.items)
+			return
+		case kUp, kCtrlP:
+			m.comp.sel = (m.comp.sel - 1 + len(m.comp.items)) % len(m.comp.items)
+			return
+		case kEsc:
+			m.comp.dismissed = true
+			return
+		}
+	}
+	defer m.updateCompletion()
 	switch k {
 	case kEsc:
 		m.drafts[t.ID] = m.input
 		m.mode = modeNormal
 	case kCtrlC:
 		delete(m.drafts, t.ID)
+		delete(m.mentions, t.ID)
 		m.input = nil
 		m.mode = modeNormal
 	case kEnter:
@@ -418,8 +526,9 @@ func (m *Model) keyCompose(k string) {
 			return
 		}
 		on := m.broadcast[t.ID]
-		if m.send(ipc.Command{Op: ipc.OpReply, ID: t.ID, Text: slack.Escape(text), On: &on}) {
+		if m.send(ipc.Command{Op: ipc.OpReply, ID: t.ID, Text: m.outgoing(t, text), On: &on}) {
 			delete(m.drafts, t.ID)
+			delete(m.mentions, t.ID)
 			m.input = nil
 			m.mode = modeNormal
 			m.sel[t.ID] = "9999999999.999999" // follow the new message

@@ -233,3 +233,66 @@ func (c *Client) PostReply(ctx context.Context, channel, threadTS, text string, 
 	err := c.Call(ctx, "chat.postMessage", p, &res)
 	return res.Message, err
 }
+
+// ChannelMembers returns the user IDs of a conversation's members, at
+// most maxPages pages of 200 (0: all).
+func (c *Client) ChannelMembers(ctx context.Context, channel string, maxPages int) ([]string, error) {
+	var all []string
+	cursor := ""
+	for page := 1; ; page++ {
+		p := url.Values{"channel": {channel}, "limit": {"200"}}
+		if cursor != "" {
+			p.Set("cursor", cursor)
+		}
+		var res struct {
+			meta
+			Members []string `json:"members"`
+		}
+		if err := c.Call(ctx, "conversations.members", p, &res); err != nil {
+			return nil, err
+		}
+		all = append(all, res.Members...)
+		if cursor = res.ResponseMetadata.NextCursor; cursor == "" || maxPages > 0 && page >= maxPages {
+			return all, nil
+		}
+	}
+}
+
+// MyChannels returns the public and private channels the user is in.
+func (c *Client) MyChannels(ctx context.Context) ([]Conversation, error) {
+	var all []Conversation
+	cursor := ""
+	for {
+		p := url.Values{"types": {"public_channel,private_channel"}, "exclude_archived": {"true"}, "limit": {"200"}}
+		if cursor != "" {
+			p.Set("cursor", cursor)
+		}
+		var res struct {
+			meta
+			Channels []Conversation `json:"channels"`
+		}
+		if err := c.Call(ctx, "users.conversations", p, &res); err != nil {
+			return nil, err
+		}
+		all = append(all, res.Channels...)
+		if cursor = res.ResponseMetadata.NextCursor; cursor == "" {
+			return all, nil
+		}
+	}
+}
+
+// CustomEmoji returns the workspace's custom emoji names (aliases
+// included).
+func (c *Client) CustomEmoji(ctx context.Context) ([]string, error) {
+	var res struct {
+		Emoji map[string]string `json:"emoji"`
+	}
+	if err := c.Call(ctx, "emoji.list", nil, &res); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(res.Emoji))
+	for n := range res.Emoji {
+		names = append(names, n)
+	}
+	return names, nil
+}

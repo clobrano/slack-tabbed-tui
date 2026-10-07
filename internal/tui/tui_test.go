@@ -13,10 +13,13 @@ import (
 )
 
 type fakeBackend struct {
-	sent   []ipc.Command
-	opened []string
-	copied []string
+	sent      []ipc.Command
+	opened    []string
+	copied    []string
+	completes []ipc.Command
 }
+
+func (f *fakeBackend) Complete(c ipc.Command) { f.completes = append(f.completes, c) }
 
 func (f *fakeBackend) Send(c ipc.Command)  { f.sent = append(f.sent, c) }
 func (f *fakeBackend) Open(u string) error { f.opened = append(f.opened, u); return nil }
@@ -95,7 +98,7 @@ func TestView(t *testing.T) {
 		"me (you)",
 		"CI APP",
 		"┃ details at https://ci.example/1",
-		":eyes: 2",
+		"👀 2",
 		"─── new ───",
 		"› Bob",
 		"[file] log.txt  2 KB",
@@ -365,5 +368,75 @@ func TestParseKeys(t *testing.T) {
 	want := []string{"a", kEnter, kCtrlJ, kAltEnter, kCtrlB, kCtrlD, kCtrlE, kUp, kEsc}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseKeys = %q, want %q", got, want)
+	}
+}
+
+func TestCompletion(t *testing.T) {
+	m, be := newModel()
+	id := m.current().ID
+	keys(m, "i", "h", "e", "y", " ", "@")
+	want := ipc.Command{Op: ipc.OpComplete, ID: id, Kind: "@", Text: ""}
+	if len(be.completes) != 1 || !reflect.DeepEqual(be.completes[0], want) {
+		t.Fatalf("complete requests %+v", be.completes)
+	}
+	keys(m, "a", "l")
+	if last := be.completes[len(be.completes)-1]; last.Text != "al" {
+		t.Errorf("last request %+v", last)
+	}
+	alice := model.Candidate{Kind: "user", Label: "@Alice Smith", Token: "<@U1>", Detail: "@alice"}
+	bot := model.Candidate{Kind: "bot", Label: "@alertbot", Token: "<@B1>", Detail: "app"}
+	// A stale answer (for "a") is ignored.
+	m.SetCompletions(ipc.Command{Kind: "@", Text: "a"}, []model.Candidate{bot}, nil)
+	if m.popupOpen() {
+		t.Fatal("stale completions shown")
+	}
+	m.SetCompletions(ipc.Command{Kind: "@", Text: "al"}, []model.Candidate{alice, bot}, nil)
+	s := screen(m, 100, 30)
+	if !strings.Contains(s, "› @Alice Smith  @alice") || !strings.Contains(s, "@alertbot    APP  app") || !strings.Contains(s, "tab/enter pick") {
+		t.Errorf("popup:\n%s", s)
+	}
+	keys(m, kDown, kUp, kTab)
+	if string(m.input) != "hey @Alice Smith " || m.popupOpen() {
+		t.Errorf("after pick: %q", string(m.input))
+	}
+	// A channel and an emoji (emoji need two letters).
+	keys(m, "i", "n", " ", "#")
+	m.SetCompletions(ipc.Command{Kind: "#", Text: ""}, []model.Candidate{{Kind: "channel", Label: "#general", Token: "<#C1>"}}, nil)
+	keys(m, kEnter)
+	keys(m, ":")
+	n := len(be.completes)
+	keys(m, "t")
+	if len(be.completes) != n {
+		t.Error("asked for emoji after one letter")
+	}
+	keys(m, "a")
+	m.SetCompletions(ipc.Command{Kind: ":", Text: "ta"}, []model.Candidate{{Kind: "emoji", Label: ":tada:", Token: ":tada:", Emoji: "🎉"}}, nil)
+	if s := screen(m, 100, 30); !strings.Contains(s, "🎉 :tada:") {
+		t.Errorf("emoji popup:\n%s", s)
+	}
+	keys(m, kEnter)
+	// esc closes the popup but not the reply box.
+	keys(m, "@", "b")
+	m.SetCompletions(ipc.Command{Kind: "@", Text: "b"}, []model.Candidate{bot}, nil)
+	keys(m, kEsc)
+	if m.popupOpen() || m.mode != modeCompose {
+		t.Error("esc did not just close the popup")
+	}
+	keys(m, kBackspace, kBackspace, "<", "3", kEnter)
+	sent := be.sent[len(be.sent)-1]
+	if sent.Op != ipc.OpReply || sent.Text != "hey <@U1> in <#C1> :tada: &lt;3" {
+		t.Errorf("sent %q", sent.Text)
+	}
+	if len(m.mentions[id]) != 0 {
+		t.Error("mentions kept after sending")
+	}
+}
+
+func TestOutgoingLongestFirst(t *testing.T) {
+	m, _ := newModel()
+	th := m.current()
+	m.mentions[th.ID] = []model.Candidate{{Label: "@Al", Token: "<@U2>"}, {Label: "@Alice", Token: "<@U1>"}, {Label: "#a&b", Token: "<#C9>"}}
+	if got := m.outgoing(th, "@Alice and @Al in #a&b, not @Bob"); got != "<@U1> and <@U2> in <#C9>, not @Bob" {
+		t.Errorf("outgoing = %q", got)
 	}
 }

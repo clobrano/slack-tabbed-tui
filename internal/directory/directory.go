@@ -6,7 +6,6 @@ package directory
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,12 +30,14 @@ type Directory struct {
 	users    map[string]slack.User
 	groups   map[string]slack.UserGroup
 	channels map[string]slack.Conversation
+	emoji    []string // custom emoji names
 }
 
 type file struct {
 	Users    []slack.User         `json:"users"`
 	Groups   []slack.UserGroup    `json:"groups"`
 	Channels []slack.Conversation `json:"channels"`
+	Emoji    []string             `json:"emoji,omitempty"`
 }
 
 // Load reads the cache at path; a missing or unreadable cache is an
@@ -65,6 +66,7 @@ func Load(path string) *Directory {
 	for _, c := range f.Channels {
 		d.channels[c.ID] = c
 	}
+	d.emoji = f.Emoji
 	return d
 }
 
@@ -84,6 +86,7 @@ func (d *Directory) Save() error {
 	for _, c := range d.channels {
 		f.Channels = append(f.Channels, c)
 	}
+	f.Emoji = d.emoji
 	d.mu.RUnlock()
 	data, err := json.Marshal(f)
 	if err != nil {
@@ -99,17 +102,12 @@ func (d *Directory) Save() error {
 	return os.Rename(tmp, d.path)
 }
 
-// Sync replaces users and groups with the full lists from Slack. On a
-// large Enterprise Grid this takes a while; names already cached keep
-// working meanwhile.
+// Sync replaces the users (people, bots and app users) with the full
+// list from Slack. On a large Enterprise Grid this takes a while; names
+// already cached keep working meanwhile.
 func (d *Directory) Sync(ctx context.Context, api API) error {
 	users, err := api.Users(ctx)
 	if err != nil {
-		return err
-	}
-	groups, err := api.UserGroups(ctx)
-	var se *slack.Error
-	if err != nil && !(errors.As(err, &se) && se.Code == "missing_scope") {
 		return err
 	}
 	d.mu.Lock()
@@ -117,12 +115,6 @@ func (d *Directory) Sync(ctx context.Context, api API) error {
 	d.users = make(map[string]slack.User, len(users))
 	for _, u := range users {
 		d.users[u.ID] = u
-	}
-	if err == nil {
-		d.groups = make(map[string]slack.UserGroup, len(groups))
-		for _, g := range groups {
-			d.groups[g.ID] = g
-		}
 	}
 	return nil
 }
@@ -302,4 +294,62 @@ func Mentioned(msgs []slack.Message) []string {
 		}
 	}
 	return ids
+}
+
+// Users returns every cached user.
+func (d *Directory) Users() []slack.User {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]slack.User, 0, len(d.users))
+	for _, u := range d.users {
+		out = append(out, u)
+	}
+	return out
+}
+
+// Groups returns every cached user group.
+func (d *Directory) Groups() []slack.UserGroup {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]slack.UserGroup, 0, len(d.groups))
+	for _, g := range d.groups {
+		out = append(out, g)
+	}
+	return out
+}
+
+// Channels returns every cached channel (not DMs).
+func (d *Directory) Channels() []slack.Conversation {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]slack.Conversation, 0, len(d.channels))
+	for _, c := range d.channels {
+		if !c.IsIM && !c.IsMPIM && c.Name != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// PutChannels adds or updates channels (e.g. from users.conversations).
+func (d *Directory) PutChannels(cs []slack.Conversation) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, c := range cs {
+		d.channels[c.ID] = c
+	}
+}
+
+// CustomEmoji returns the workspace's custom emoji names.
+func (d *Directory) CustomEmoji() []string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return append([]string(nil), d.emoji...)
+}
+
+// SetCustomEmoji replaces the custom emoji names.
+func (d *Directory) SetCustomEmoji(names []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.emoji = append([]string(nil), names...)
 }

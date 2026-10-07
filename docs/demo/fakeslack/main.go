@@ -47,6 +47,9 @@ func main() {
 	s.Convs["C01INFRA"] = slack.Conversation{ID: "C01INFRA", Name: "team-infra", IsChannel: true, IsMember: true}
 	s.Convs["C02REL"] = slack.Conversation{ID: "C02REL", Name: "releases", IsChannel: true, IsMember: true}
 	s.Convs["D01BOB"] = slack.Conversation{ID: "D01BOB", IsIM: true, User: "U2"}
+	s.Members["C01INFRA"] = []string{"U0ME", "U1", "U2", "U3"}
+	s.Members["C02REL"] = []string{"U0ME", "U1", "U2"}
+	s.Emoji["shipit"] = "https://emoji.example/shipit.png"
 	base := time.Now().Add(-3 * time.Hour).Unix()
 	ts := func(min int) string { return fmt.Sprintf("%d.000100", base+int64(min)*60) }
 	s.AddThread("C01INFRA",

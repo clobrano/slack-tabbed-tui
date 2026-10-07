@@ -34,6 +34,8 @@ type Server struct {
 	Groups   []slack.UserGroup
 	Convs    map[string]slack.Conversation
 	Threads  map[string][]slack.Message // key: channel + "/" + thread ts
+	Members  map[string][]string        // channel members, by channel
+	Emoji    map[string]string          // custom emoji: name → URL or "alias:name"
 	PageSize int                        // messages/users per page, default 200
 	// RateLimit makes the next N calls fail with HTTP 429.
 	RateLimit int
@@ -50,6 +52,8 @@ type Server struct {
 func New() *Server {
 	s := &Server{
 		Convs:        map[string]slack.Conversation{},
+		Members:      map[string][]string{},
+		Emoji:        map[string]string{},
 		Threads:      map[string][]slack.Message{},
 		nextTS:       time.Now().Unix(),
 		SocketOpened: make(chan struct{}, 16),
@@ -212,6 +216,22 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			"self": map[string]string{"id": s.Auth.UserID, "name": s.Auth.User},
 			"team": map[string]string{"id": s.Auth.TeamID, "domain": "acme"},
 		}))
+	case "conversations.members":
+		ids := s.Members[f.Get("channel")]
+		page, next := s.page(len(ids), f.Get("cursor"))
+		reply(w, withCursor(map[string]any{"members": ids[page[0]:page[1]]}, next))
+	case "users.conversations":
+		var mine []slack.Conversation
+		for _, c := range s.Convs {
+			if c.IsMember && !c.IsIM {
+				mine = append(mine, c)
+			}
+		}
+		slices.SortFunc(mine, func(a, b slack.Conversation) int { return strings.Compare(a.ID, b.ID) })
+		page, next := s.page(len(mine), f.Get("cursor"))
+		reply(w, withCursor(map[string]any{"channels": mine[page[0]:page[1]]}, next))
+	case "emoji.list":
+		reply(w, ok(map[string]any{"emoji": s.Emoji}))
 	case "usergroups.list":
 		reply(w, ok(map[string]any{"usergroups": s.Groups}))
 	case "chat.postMessage":

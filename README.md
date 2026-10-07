@@ -3,9 +3,9 @@
 Follow hand-picked Slack threads from the terminal, one tab per thread, in
 the style of [ghwatch](https://github.com/clobrano/ghwatch).
 
-**Status: early development.** Reading threads live, replying,
-notifications and the tmux status line work. Next: `@`, `#` and `:`
-completion in the reply box, then reactions, edits and files. The plan
+**Status: early development.** Reading threads live, replying with
+`@` (people, bots, groups), `#` and `:` completion, notifications and
+the tmux status line work. Next: reactions, edits and files. The plan
 is in the [PRD](docs/PRD.md), the choices made so far in
 [decisions](docs/decisions.md).
 
@@ -123,6 +123,8 @@ runs the sign-in against a real, headless Chromium.
 | `internal/slack/slacktest` | fake Slack workspace for tests (and `docs/demo/fakeslack`) |
 | `internal/daemon` | event streams, fetching, unread, notifications, shared state |
 | `internal/model` | the snapshot: threads ready to display |
+| `internal/complete` | what `@`, `#` and `:` complete to, ranked like Slack |
+| `internal/emoji` | Slack's emoji names (generated from iamcal/emoji-data, MIT) |
 | `internal/tui` | tabbed TUI (raw terminal, no third-party dependency) |
 | `internal/ipc`, `internal/notify`, `internal/browser` | daemon socket, notifiers, links and clipboard (from ghwatch) |
 | `internal/creds` | stored sessions, one per workspace |

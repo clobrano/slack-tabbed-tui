@@ -325,3 +325,65 @@ func TestErrors(t *testing.T) {
 		t.Errorf("snapshot not written: %v", err)
 	}
 }
+
+func TestComplete(t *testing.T) {
+	e := newEnv(t)
+	bot := slack.User{ID: "B1", Name: "deploybot", IsBot: true}
+	bot.Profile.DisplayName = "Deploy Bot"
+	bob := slack.User{ID: "U2", Name: "bob"}
+	e.slack.Users = append(e.slack.Users, bot, bob)
+	e.slack.Groups = []slack.UserGroup{{ID: "S1", Handle: "oncall"}}
+	e.slack.Members["C0GEN"] = []string{"U2", "B1"}
+	e.slack.Emoji["shipit"] = "https://emoji/shipit.png"
+	e.slack.Reply("C0GEN", parentTS, "U1", "ship it :tada:", false)
+	e.do(ipc.Command{Op: ipc.OpAdd, ID: link})
+	s := e.wait("fetched", func(s *model.Snapshot) bool { th := thread(s); return th != nil && len(th.Messages) == 2 })
+	if got := thread(s).Messages[1].Text; got != "ship it 🎉" {
+		t.Errorf("emoji not rendered: %q", got)
+	}
+
+	query := func(kind, text string) []model.Candidate {
+		t.Helper()
+		m, err := e.c.Query(context.Background(), ipc.Command{Op: ipc.OpComplete, ID: threadID, Kind: kind, Text: text})
+		if err != nil {
+			t.Fatalf("complete %s%s: %v", kind, text, err)
+		}
+		return m.Candidates
+	}
+	// The directory syncs in the background: wait for the bot.
+	var got []model.Candidate
+	for i := 0; i < 200; i++ {
+		if got = query("@", "dep"); len(got) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(got) != 1 || got[0].Token != "<@B1>" || got[0].Kind != "bot" {
+		t.Fatalf("@dep = %+v", got)
+	}
+	// Empty query: the participant (Alice) first, then members, never me.
+	all := query("@", "")
+	if len(all) < 3 || all[0].Label != "@Alice" || all[1].Label != "@bob" && all[1].Label != "@Deploy Bot" {
+		t.Errorf("@ = %+v", all)
+	}
+	for _, c := range all {
+		if c.Token == "<@U0ME>" {
+			t.Errorf("proposed myself: %+v", c)
+		}
+	}
+	if got := query("@", "onc"); len(got) != 1 || got[0].Token != "<!subteam^S1>" {
+		t.Errorf("@onc = %+v", got)
+	}
+	if got := query("#", "gen"); len(got) != 1 || got[0].Token != "<#C0GEN>" {
+		t.Errorf("#gen = %+v", got)
+	}
+	if got := query(":", "shipi"); len(got) != 1 || got[0].Label != ":shipit:" {
+		t.Errorf(":shipi = %+v", got)
+	}
+	if _, err := e.c.Query(context.Background(), ipc.Command{Op: ipc.OpComplete, ID: "thread:x.slack.com/C11/1.000001", Kind: "@"}); err == nil {
+		t.Error("completion for an unwatched thread")
+	}
+	if n := e.slack.CallCount("conversations.members"); n != 1 {
+		t.Errorf("members fetched %d times, want once (cached)", n)
+	}
+}

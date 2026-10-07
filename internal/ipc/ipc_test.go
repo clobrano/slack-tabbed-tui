@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -25,6 +26,13 @@ func (h *handler) Snapshot() *model.Snapshot {
 }
 
 func (h *handler) Handle(_ context.Context, cmd Command) (string, error) { return "ok " + cmd.Op, nil }
+
+func (h *handler) Complete(_ context.Context, cmd Command) ([]model.Candidate, error) {
+	if cmd.Text == "fail" {
+		return nil, errors.New("no session")
+	}
+	return []model.Candidate{{Kind: "user", Label: "@" + cmd.Text, Token: "<@U1>"}}, nil
+}
 
 func serve(t *testing.T) (*Server, string) {
 	dir, err := os.MkdirTemp("", "gwipc")
@@ -116,5 +124,25 @@ func TestCommandResult(t *testing.T) {
 	<-c.Done()
 	if _, err := c.Do(context.Background(), Command{Op: OpSync}); err == nil {
 		t.Error("Do on a closed client succeeded")
+	}
+}
+
+func TestQueryComplete(t *testing.T) {
+	_, path := serve(t)
+	c, err := Dial(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	<-c.Snapshots()
+	m, err := c.Query(context.Background(), Command{Op: OpComplete, Kind: "@", Text: "ali"})
+	if err != nil || len(m.Candidates) != 1 || m.Candidates[0].Label != "@ali" {
+		t.Fatalf("Query = %+v, %v", m, err)
+	}
+	if _, err := c.Query(context.Background(), Command{Op: OpComplete, Text: "fail"}); err == nil || err.Error() != "no session" {
+		t.Errorf("error: %v", err)
+	}
+	if info, err := c.Do(context.Background(), Command{Op: OpSync}); err != nil || info != "ok sync" {
+		t.Errorf("Do still works: %q %v", info, err)
 	}
 }

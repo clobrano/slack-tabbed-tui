@@ -31,6 +31,11 @@ type (
 		info string
 		err  error
 	}
+	completeMsg struct {
+		cmd   ipc.Command
+		items []model.Candidate
+		err   error
+	}
 	resizeMsg struct{}
 	tickMsg   struct{}
 	quitMsg   struct{}
@@ -66,6 +71,22 @@ func (b *backend) Send(cmd ipc.Command) {
 		defer cancel()
 		info, err := c.Do(ctx, cmd)
 		b.events <- resultMsg{info, err}
+	}()
+}
+
+// Complete asks the daemon for completions in the background.
+func (b *backend) Complete(cmd ipc.Command) {
+	b.mu.Lock()
+	c := b.client
+	b.mu.Unlock()
+	if c == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		res, err := c.Query(ctx, cmd)
+		b.events <- completeMsg{cmd, res.Candidates, err}
 	}()
 }
 
@@ -166,6 +187,8 @@ func Run(ctx context.Context, opts Options) error {
 				m.SetConnected(bool(ev))
 			case resultMsg:
 				m.Result(ev.info, ev.err)
+			case completeMsg:
+				m.SetCompletions(ev.cmd, ev.items, ev.err)
 			case quitMsg:
 				return nil
 			}

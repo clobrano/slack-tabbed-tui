@@ -30,6 +30,9 @@ const (
 	OpMute    = "mute"    // On: global mute
 	OpRead    = "read"    // ID, TS: the user has seen the thread up to TS
 	OpReply   = "reply"   // ID, Text, On (also send to channel): post a reply
+	// OpComplete asks what Text completes to after Kind ("@", "#" or
+	// ":") in thread ID; the result carries Candidates.
+	OpComplete = "complete"
 )
 
 // Message types.
@@ -45,6 +48,7 @@ type Command struct {
 	ID     string                   `json:"id,omitempty"`
 	TS     string                   `json:"ts,omitempty"`
 	Text   string                   `json:"text,omitempty"`
+	Kind   string                   `json:"kind,omitempty"`
 	On     *bool                    `json:"on,omitempty"`
 	Events map[model.EventType]bool `json:"events,omitempty"`
 }
@@ -57,6 +61,8 @@ type Message struct {
 	Command  *Command        `json:"command,omitempty"`
 	Info     string          `json:"info,omitempty"`
 	Error    string          `json:"error,omitempty"`
+	// Candidates answers OpComplete.
+	Candidates []model.Candidate `json:"candidates,omitempty"`
 }
 
 // maxLine bounds one message; a snapshot of hundreds of items fits.
@@ -69,6 +75,11 @@ type Handler interface {
 	// Handle applies a command. It may block; only the sending client
 	// waits for it.
 	Handle(ctx context.Context, cmd Command) (info string, err error)
+}
+
+// Completer is implemented by handlers that answer OpComplete.
+type Completer interface {
+	Complete(ctx context.Context, cmd Command) ([]model.Candidate, error)
 }
 
 // Server accepts clients on a Unix socket.
@@ -211,8 +222,13 @@ func (s *Server) serveClient(ctx context.Context, conn net.Conn) {
 		if err := json.Unmarshal(sc.Bytes(), &m); err != nil || m.Type != TypeCommand || m.Command == nil {
 			continue
 		}
-		info, err := s.handler.Handle(ctx, *m.Command)
-		res := Message{Type: TypeResult, Seq: m.Seq, Info: info}
+		res := Message{Type: TypeResult, Seq: m.Seq}
+		var err error
+		if comp, ok := s.handler.(Completer); ok && m.Command.Op == OpComplete {
+			res.Candidates, err = comp.Complete(ctx, *m.Command)
+		} else {
+			res.Info, err = s.handler.Handle(ctx, *m.Command)
+		}
 		if err != nil {
 			res.Error = err.Error()
 		}
@@ -325,42 +341,48 @@ func (c *Client) read() {
 
 // Do sends a command and waits for its result.
 func (c *Client) Do(ctx context.Context, cmd Command) (string, error) {
+	m, err := c.Query(ctx, cmd)
+	return m.Info, err
+}
+
+// Query sends a command and returns its whole result message.
+func (c *Client) Query(ctx context.Context, cmd Command) (Message, error) {
 	seq := c.seq.Add(1)
 	ch := make(chan Message, 1)
 	c.mu.Lock()
 	if c.pending == nil {
 		c.mu.Unlock()
-		return "", ErrClosed
+		return Message{}, ErrClosed
 	}
 	c.pending[seq] = ch
 	c.mu.Unlock()
 
 	line, err := encode(Message{Type: TypeCommand, Seq: seq, Command: &cmd})
 	if err != nil {
-		return "", err
+		return Message{}, err
 	}
 	c.wmu.Lock()
 	c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_, err = c.conn.Write(line)
 	c.wmu.Unlock()
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrClosed, err)
+		return Message{}, fmt.Errorf("%w: %v", ErrClosed, err)
 	}
 	select {
 	case m, ok := <-ch:
 		if !ok {
-			return "", ErrClosed
+			return Message{}, ErrClosed
 		}
 		if m.Error != "" {
-			return m.Info, errors.New(m.Error)
+			return m, errors.New(m.Error)
 		}
-		return m.Info, nil
+		return m, nil
 	case <-ctx.Done():
 		c.mu.Lock()
 		if c.pending != nil {
 			delete(c.pending, seq)
 		}
 		c.mu.Unlock()
-		return "", ctx.Err()
+		return Message{}, ctx.Err()
 	}
 }

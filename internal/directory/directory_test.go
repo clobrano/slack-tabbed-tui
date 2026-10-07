@@ -68,6 +68,9 @@ func TestSync(t *testing.T) {
 	if err := d.Sync(context.Background(), s.Client()); err != nil {
 		t.Fatal(err)
 	}
+	if err := d.SyncGroups(context.Background(), s.Client()); err != nil {
+		t.Fatal(err)
+	}
 	if d.UserName("B1") != "Deploy Bot" || d.GroupHandle("S1") != "oncall" {
 		t.Errorf("after sync: %q %q", d.UserName("B1"), d.GroupHandle("S1"))
 	}

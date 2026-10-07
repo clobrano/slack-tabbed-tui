@@ -58,6 +58,29 @@ In the reply box: `enter` sends, `alt+enter` or `ctrl+j` starts a new
 line, `ctrl+b` toggles "also send to the channel", `esc` closes the box
 and keeps the draft (per thread), `ctrl+c` discards it.
 
+### Completion
+
+Typing `@`, `#` or `:` at the start of a word (two letters after `:`)
+opens a list above the reply box, as in Slack:
+
+- `@` lists people, **bots and apps** (tagged `APP`), user groups and
+  `@here` / `@channel` / `@everyone` (not in DMs). People already in the
+  thread come first (most recent first), then the channel's members,
+  then everyone else; a name that starts with what you typed beats one
+  where only a later word does (`@ald` finds Bob Alden). Accents don't
+  matter (`jose` finds José). You are never proposed.
+- `#` lists channels, yours first.
+- `:` lists emoji, standard ones (Slack's names) and the workspace's
+  custom ones.
+
+`tab` or `enter` picks, `↑`/`↓` or `ctrl+n`/`ctrl+p` choose, `esc`
+closes the list. A picked person shows as `@Name` in the draft and is
+sent as a real mention; the same for groups and channels.
+
+The list comes from the workspace directory, fetched once when the
+daemon connects (people and bots with `users.list`, user groups, your
+channels, custom emoji) and cached on disk.
+
 ## Trying it without Slack
 
 `docs/demo/fakeslack` serves a fake workspace with sample threads and

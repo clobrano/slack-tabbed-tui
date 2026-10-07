@@ -19,9 +19,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/clobrano/slack-tabbed-tui/internal/complete"
 	"github.com/clobrano/slack-tabbed-tui/internal/config"
 	"github.com/clobrano/slack-tabbed-tui/internal/creds"
 	"github.com/clobrano/slack-tabbed-tui/internal/directory"
+	"github.com/clobrano/slack-tabbed-tui/internal/emoji"
 	"github.com/clobrano/slack-tabbed-tui/internal/ipc"
 	"github.com/clobrano/slack-tabbed-tui/internal/model"
 	"github.com/clobrano/slack-tabbed-tui/internal/notify"
@@ -78,6 +80,8 @@ type space struct {
 	stop   context.CancelFunc
 	conn   model.Conn
 	err    string
+
+	members map[string][]string // channel members, for ranking completions
 }
 
 func (d *Daemon) now() time.Time {
@@ -367,7 +371,7 @@ func convert(prev model.Thread, msgs []slack.Message, sp *space) model.Thread {
 			Author:     sp.dir.Author(m),
 			Bot:        m.IsBot(),
 			Mine:       me != "" && m.User == me,
-			Text:       slack.PlainText(m.Text, sp.dir),
+			Text:       emoji.Render(slack.PlainText(m.Text, sp.dir)),
 			Edited:     m.Edited != nil,
 			Broadcast:  m.Subtype == "thread_broadcast",
 			MentionsMe: mentions(m.Text, me),
@@ -397,7 +401,7 @@ func convert(prev model.Thread, msgs []slack.Message, sp *space) model.Thread {
 					s = a.Fallback
 				}
 				if s != "" {
-					out.Attachments = append(out.Attachments, slack.PlainText(s, sp.dir))
+					out.Attachments = append(out.Attachments, emoji.Render(slack.PlainText(s, sp.dir)))
 					break
 				}
 			}
@@ -706,9 +710,7 @@ func (d *Daemon) stream(ctx context.Context, sp *space) {
 			d.mu.Unlock()
 		}
 	}
-	if err := sp.dir.SyncGroups(ctx, sp.client); err != nil && ctx.Err() == nil {
-		d.Log.Printf("%s: user groups: %v", sp.host, err)
-	}
+	go d.syncDirectory(ctx, sp)
 	st := &slack.Stream{
 		Client: sp.client,
 		OnState: func(s slack.StreamState, err error) {
@@ -730,6 +732,89 @@ func (d *Daemon) stream(ctx context.Context, sp *space) {
 	if err != nil && ctx.Err() == nil {
 		d.Log.Printf("%s: event stream ended: %v", sp.host, err)
 	}
+}
+
+// syncDirectory loads everything completion needs: user groups (one
+// call, so @team mentions show at once), then every user and bot, the
+// user's channels and the custom emoji. Names already cached keep
+// working meanwhile.
+func (d *Daemon) syncDirectory(ctx context.Context, sp *space) {
+	logErr := func(what string, err error) {
+		if err != nil && ctx.Err() == nil {
+			d.Log.Printf("%s: %s: %v", sp.host, what, err)
+		}
+	}
+	logErr("user groups", sp.dir.SyncGroups(ctx, sp.client))
+	logErr("users", sp.dir.Sync(ctx, sp.client))
+	if chans, err := sp.client.MyChannels(ctx); err == nil {
+		sp.dir.PutChannels(chans)
+	} else {
+		logErr("channels", err)
+	}
+	if names, err := sp.client.CustomEmoji(ctx); err == nil {
+		sp.dir.SetCustomEmoji(names)
+	} else {
+		logErr("custom emoji", err)
+	}
+	logErr("directory", sp.dir.Save())
+}
+
+// Complete implements ipc.Completer: what @, # or : and cmd.Text
+// complete to in thread cmd.ID.
+func (d *Daemon) Complete(ctx context.Context, cmd ipc.Command) ([]model.Candidate, error) {
+	d.mu.Lock()
+	t := d.snap.Find(cmd.ID)
+	var th model.Thread
+	if t != nil {
+		th = *t
+	}
+	sp := d.spaces[th.Workspace]
+	d.mu.Unlock()
+	if t == nil {
+		return nil, fmt.Errorf("not watching %s", cmd.ID)
+	}
+	if sp == nil || sp.client == nil {
+		return nil, errors.New(d.noSessionMsg(th.Workspace))
+	}
+	switch cmd.Kind {
+	case "@":
+		me := sp.cred.UserID
+		var recent []string
+		for i := len(th.Messages) - 1; i >= 0; i-- {
+			if id := th.Messages[i].AuthorID; id != "" && id != me {
+				recent = append(recent, id)
+			}
+		}
+		where := complete.Where{Participants: recent, Members: d.members(ctx, sp, th.Channel), DM: th.IsDM, Me: me}
+		return complete.People(sp.dir, where, cmd.Text), nil
+	case "#":
+		return complete.Channels(sp.dir, cmd.Text), nil
+	case ":":
+		return complete.Emoji(sp.dir, cmd.Text), nil
+	}
+	return nil, fmt.Errorf("unknown completion %q", cmd.Kind)
+}
+
+// members returns a channel's members, fetched once (up to 1000).
+func (d *Daemon) members(ctx context.Context, sp *space, channel string) []string {
+	d.mu.Lock()
+	m, ok := sp.members[channel]
+	d.mu.Unlock()
+	if ok {
+		return m
+	}
+	m, err := sp.client.ChannelMembers(ctx, channel, 5)
+	if err != nil {
+		d.Log.Printf("%s: members of %s: %v", sp.host, channel, err)
+		return nil
+	}
+	d.mu.Lock()
+	if sp.members == nil {
+		sp.members = map[string][]string{}
+	}
+	sp.members[channel] = m
+	d.mu.Unlock()
+	return m
 }
 
 // route queues a fetch of the watched threads an event concerns.
