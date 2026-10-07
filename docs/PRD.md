@@ -465,6 +465,7 @@ stale.
 | Q1 | One shared distributed app, or each user creates their own? | Out of scope: there is no Slack app |
 | Q3 | Unread state can't sync with Slack; local-only? | Moot: the browser session syncs read state with Slack |
 | Q5 | Token paste vs. guided OAuth? | Out of scope: OAuth needs a Slack app. Sign-in is the browser login (§6 B) |
+| Q9 | Name of the binary? | `slack-tabbed-tui` |
 
 ### Open
 
@@ -476,7 +477,6 @@ stale.
 | Q6 | Inline images in the terminal: worth it? | P2, behind a setting, kitty + sixel |
 | Q7 | Which of "save for later / remind me / schedule" matter? | Schedule only (P2) |
 | Q8 | Separate binary, or a `thread` item kind inside ghwatch (its `kind.Kind` is the seam)? | Separate app sharing code: the composer and directory cache don't fit ghwatch's "checks" model |
-| Q9 | Name of the binary (`slack-tabbed-tui` is long): `slackwatch`? `sthreads`? | — |
 | Q10 | Should replying be able to *join* a public channel the user isn't in? Slack allows replying only to members | Ask before joining |
 
 ## 12. References
